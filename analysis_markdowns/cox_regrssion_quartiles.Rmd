@@ -1,0 +1,1211 @@
+---
+title: "Cox Proportional Hazards model: quartlies of conc. 25(OH)D & DBP"
+author: "Debojyoti Das"
+date: "2025-07-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+set output directory
+```{r output_dir, message=FALSE, warning=FALSE}
+output_dir <- "/Users/debda22/OneDrive - Linköpings universitet/T1D_vitamin_D_results/cox_analysi_revision/quartiles"
+
+if(!dir.exists(output_dir)){
+  dir.create(output_dir, recursive = TRUE)
+} else {
+  cat(paste0(output_dir," is already present!!\n"))
+}
+```
+
+load libraries
+```{r load_libraries, message=FALSE, warning=FALSE}
+pacman::p_load(
+  haven,        
+  zoo,
+  sjlabelled,
+  janitor,       
+  data.table,   
+  ggplot2,
+  comprehenr,  
+  stringr,     
+  rstatix,
+  dplyr,
+  tidyr,
+  forcats,
+  officer,
+  cowplot,
+  ggExtra,
+  ggpubr,
+  GGally,
+  janitor,
+  ggrepel,
+  ggtext,
+  parameters,
+  lme4,
+  broom,
+  pscl,
+  tibble,
+  knitr,
+  ggeffects,
+  cobalt,
+  WeightIt,
+  marginaleffects,
+  splines,
+  survival,
+  survminer,
+  purrr,
+  nnet,
+  magick
+  )
+```
+
+
+```{r word_sect_properties}
+sect_properties <- prop_section(
+  page_size = page_size(
+    orient = "landscape",
+    height = 11.7,
+    width = 8.3
+  ),
+  page_margins = page_mar(
+    top = 0.5,
+    bottom = 0.5,
+    left = 0.5,
+    right = 0.5,
+    header = 0.3,
+    footer = 0.3,
+    gutter = 0
+  ),
+  type = "continuous"
+)
+```
+
+define paths
+```{r define_paths, eval=TRUE}
+data_root <- "/Users/debda22/OneDrive - Linköpings universitet/"
+data_root <- paste0(data_root,"Linkoping_projects/ABIS_RAW_DATA_SPSS/")
+```
+
+load parameters and helper functions
+```{r}
+source(paste0(data_root,"../../Rmd_and_R_files/T1D_projects/all_parameters_case_control_T1D_vitamin_D.R"))
+source(paste0(data_root,"../../Rmd_and_R_files/T1D_projects/cox_T1D_helper.R"))
+```
+
+
+read/load vitamin_d_case_control_plus_abis for analysis
+```{r}
+vitamin_d_case_control_plus_abis <- read.table(paste0(data_root, "/vitamin_d/vitamin_d_case_control_plus_abis.csv"))
+```
+
+reorder factors
+```{r}
+vitamin_d_case_control_plus_abis$First_degree_T1D_heredity_cat <- factor(
+  vitamin_d_case_control_plus_abis$First_degree_T1D_heredity_cat,
+  levels = c("No", "Yes")
+)
+
+vitamin_d_case_control_plus_abis$Smoking_during_pregnancy <- factor(
+  vitamin_d_case_control_plus_abis$Smoking_during_pregnancy,
+  levels = c("No", "Yes")
+)
+
+vitamin_d_case_control_plus_abis$Parity <- factor(
+  vitamin_d_case_control_plus_abis$Parity,
+  levels = c("First parity", "Previous parity")
+)
+
+vitamin_d_case_control_plus_abis$Preterm_dichotomous <- factor(
+  vitamin_d_case_control_plus_abis$Preterm_dichotomous,
+  levels = c("Normal", "Preterm")
+)
+
+vitamin_d_case_control_plus_abis$Season <- factor(
+  vitamin_d_case_control_plus_abis$Season,
+  levels = c("Autumn", "Spring", "Summer", "Winter")
+)
+
+vitamin_d_case_control_plus_abis$Sex_cat <- factor(
+  vitamin_d_case_control_plus_abis$Sex_cat,
+  levels = c("Boy", "Girl")
+)
+
+vitamin_d_case_control_plus_abis$Fish_any_pregnancy <- factor(
+  vitamin_d_case_control_plus_abis$Fish_any_pregnancy,
+  levels = c("Seldom", "1–2 times week or more"))
+
+vitamin_d_case_control_plus_abis$Delivery_mode <- factor(
+  vitamin_d_case_control_plus_abis$Delivery_mode,
+  levels = c("Normal","caesarean", "other problem"),
+  labels = c("Normal","Caesarean", "Other problem"))
+```
+
+
+```{r}
+qs_birth_weight <- round(quantile(vitamin_d_case_control_plus_abis$Birth_weight, probs = seq(0, 1, 0.25), na.rm = TRUE),2)
+
+vitamin_d_case_control_plus_abis <- vitamin_d_case_control_plus_abis %>%
+    dplyr::mutate(
+        Birth_weight_cat = cut(
+            Birth_weight,
+            breaks = qs_birth_weight,
+            include.lowest = TRUE,
+            labels = c(
+                paste0("≤", qs_birth_weight[2]),                                    
+                paste0(qs_birth_weight[2], "–", qs_birth_weight[3]),                        
+                paste0(qs_birth_weight[3], "–", qs_birth_weight[4]),                           
+                paste0(">", qs_birth_weight[4])                                     
+            )
+        )
+    )
+
+
+```
+
+
+Cox analysis
+
+conducting a time-to-event Cox regression with:
+
+ - Time scale: Age (from birth)
+
+ - Exposure: Fixed (cord blood 25(OH)D)
+
+ - Follow-up ends: December 31, 2020
+
+Outcome: T1D diagnosis
+```{r event_time, warning=FALSE}
+vitamin_d_case_control_plus_abis$start_age <- 0  # since follow-up starts at birth
+
+vitamin_d_case_control_plus_abis$INDATUMA <- as.Date(vitamin_d_case_control_plus_abis$INDATUMA, format = "%Y-%m-%d")
+```
+
+
+```{r event_time_formulation, warning=FALSE}
+# Set exit date based on whether T1D occurred before 2020-12-31
+vitamin_d_case_control_plus_abis$exit_date <- as.Date(ifelse(
+  !is.na(vitamin_d_case_control_plus_abis$T1D_age_diagnosis) &
+    vitamin_d_case_control_plus_abis$INDATUMA<= as.Date("2020-12-31"),
+  vitamin_d_case_control_plus_abis$INDATUMA,
+  as.Date("2020-12-31")
+))
+```
+
+
+```{r event_time_calculation, warning=FALSE}
+# Calculate age at exit in years
+vitamin_d_case_control_plus_abis$exit_age <- as.numeric(
+  difftime(
+    vitamin_d_case_control_plus_abis$exit_date,
+    vitamin_d_case_control_plus_abis$child_dob,
+    units = "days"
+  )
+) / 365.25
+
+vitamin_d_case_control_plus_abis$event <- ifelse(
+  !is.na(vitamin_d_case_control_plus_abis$INDATUMA) &
+    vitamin_d_case_control_plus_abis$INDATUMA <= as.Date("2020-12-31"),
+  1,
+  0
+)
+```
+
+
+```{r cox_data, warning=FALSE}
+df_cox_full <- vitamin_d_case_control_plus_abis %>%
+  dplyr::select(all_of(
+    c(
+      "ABISnr",
+      "DBP",
+      "conc_25OHD",
+      "diagnosis",
+      "child_dob",
+      "First_degree_T1D_heredity_cat",
+      "Preterm_group",
+      "Preterm_dichotomous",
+      "Delivery_mode",
+      "Gestational_age",
+      "Birth_weight",
+      "Birth_weight_cat",
+      "Birth_height",
+      "Season",
+      "Parity",
+      "Smoking_during_pregnancy",
+      "Vitamin_mineral_supplement_pregnancy",
+      "Fish_lake_pregnancy",
+      "Fish_Baltic_pregnancy",
+      "Fish_other_pregnancy",
+      "Fish_any_pregnancy",
+      "Sex_cat",
+      # "HDIA",
+      "DIAGNOS",
+      # "INDATUMA",
+      # "UTDATUMA",
+      # "SOURCE",
+      "T1D_age_diagnosis",
+      "onset_age_group",
+      "Birth_weight_cat",
+      "day_of_year",
+      # "Ai",
+      # "adjusted_25OHD",
+      "start_age",
+      "exit_date",
+      "exit_age",
+      "event"
+    )
+  ))
+```
+
+
+
+```{r}
+child_covariates <- c("Preterm_dichotomous","Birth_weight", "Season", "Sex_cat")
+
+maternal_covariates <- c(
+  "First_degree_T1D_heredity_cat",
+  "Smoking_during_pregnancy",
+  # "Vitamin_mineral_supplement_pregnancy",
+  "Fish_any_pregnancy",
+  "Parity",
+  "Delivery_mode"
+)
+```
+
+```{r remove_missing_rows}
+df_cox_full <- df_cox_full %>%
+  dplyr::select(all_of(
+    c(
+      "ABISnr",
+      "diagnosis",
+      "conc_25OHD",
+      "DBP",
+      "exit_age",
+      "event",
+      "Birth_weight_cat",
+      child_covariates,
+      maternal_covariates,
+      "onset_age_group"
+    )
+  )) 
+```
+
+Use categorical (quartiles) for conc. 25(OH)D instead of continuous values
+
+
+```{r}
+qs_conc_25OHD <- quantile(df_cox_full$conc_25OHD, probs = seq(0, 1, 0.25), na.rm = TRUE)
+qs_DBP <- quantile(df_cox_full$DBP, probs = seq(0, 1, 0.25), na.rm = TRUE)
+
+df_cox_full <- df_cox_full %>%
+  dplyr::mutate(
+        quartile_25OHD = cut(
+            conc_25OHD,
+            breaks = qs_conc_25OHD,
+            include.lowest = TRUE,
+            labels = c(
+                paste0("≤", qs_conc_25OHD[2]),                                    
+                paste0(qs_conc_25OHD[2], "–", qs_conc_25OHD[3]),                             
+                paste0(qs_conc_25OHD[3], "–", qs_conc_25OHD[4]),                             
+                paste0(">", qs_conc_25OHD[4])                                     
+            )
+        ),
+        quartile_DBP = cut(
+            DBP,
+            breaks = qs_DBP,
+            include.lowest = TRUE,
+            labels = c(
+                paste0("≤", qs_DBP[2]),                                    
+                paste0(qs_DBP[2], "–", qs_DBP[3]),                             
+                paste0(qs_DBP[3], "–", qs_DBP[4]),                             
+                paste0(">", qs_DBP[4])                                     
+            )
+        )        
+    ) %>%
+  dplyr::select(all_of(
+    c(
+      "ABISnr",
+      "diagnosis",
+      "quartile_25OHD",
+      "quartile_DBP",
+      "exit_age",
+      "event",
+      "Birth_weight_cat",
+      child_covariates,
+      maternal_covariates,
+      "onset_age_group"
+    )
+  )) 
+```
+
+Check Proportinal Hazard Assumption
+```{r}
+fit_quartile_25OHD   <- coxph(
+  Surv(exit_age, event) ~ quartile_25OHD + Preterm_dichotomous + Birth_weight_cat +
+    Season + Sex_cat + First_degree_T1D_heredity_cat + Smoking_during_pregnancy +
+    Fish_any_pregnancy + Parity + Delivery_mode,
+  data = df_cox_full
+)
+
+fit_quartile_DBP <- coxph(
+  Surv(exit_age, event) ~ quartile_DBP + Preterm_dichotomous + Birth_weight_cat +
+    Season + Sex_cat + First_degree_T1D_heredity_cat + Smoking_during_pregnancy +
+    Fish_any_pregnancy + Parity + Delivery_mode,
+  data = df_cox_full
+)
+```
+
+
+Schoenfeld residuals against the transformed time
+
+```{r}
+zph_quartile_25OHD <- cox.zph(fit_quartile_25OHD)
+zph_quartile_DBP <- cox.zph(fit_quartile_DBP)
+
+zph_quartile_25OHD_table <- zph_quartile_25OHD$table %>% 
+  as.data.frame %>%
+  tibble::rownames_to_column(var = "Term") %>%
+  dplyr::mutate(Term = sapply(Term,clean_terms))
+
+zph_quartile_DBP_table <- zph_quartile_DBP$table %>% 
+  as.data.frame %>%
+  tibble::rownames_to_column(var = "Term") %>%
+  dplyr::mutate(Term = sapply(Term,clean_terms))
+
+dimnames(zph_quartile_25OHD$y)[[2]] <- sapply(dimnames(zph_quartile_25OHD$y)[[2]], clean_terms)
+dimnames(zph_quartile_DBP$y)[[2]] <- sapply(dimnames(zph_quartile_DBP$y)[[2]], clean_terms)
+
+print(zph_quartile_25OHD)           
+print(zph_quartile_DBP)
+```
+
+
+```{r}
+pdf(
+  paste0(output_dir,"/zph_quartile_25OHD_schoenfeld_residuals_vs_transformed_time_PH_check.pdf"),
+  width = 11.67, 
+  height = 8.67, 
+  font = "Times"
+  )
+
+par(mfrow = c(2,2))
+plot(zph_quartile_25OHD, var = 1:4, plot = TRUE)
+
+par(mfrow = c(2,2))
+plot(zph_quartile_25OHD, var = 5:8, plot = TRUE)
+
+## page 3
+par(mfrow = c(2,2))
+plot(zph_quartile_25OHD, var = 9:10, plot = TRUE)
+
+dev.off()
+
+img <- image_read_pdf(paste0(output_dir, "/zph_quartile_25OHD_schoenfeld_residuals_vs_transformed_time_PH_check.pdf"), density = 300)
+image_write(img, paste0(output_dir, "/zph_quartile_25OHD_schoenfeld_residuals_vs_transformed_time_PH_check_300dpi.pdf"), format = "pdf")
+```
+
+
+```{r}
+pdf(
+  paste0(output_dir,"/zph_quartile_DBP_schoenfeld_residuals_vs_transformed_time_PH_check.pdf"),
+  width = 11.67, 
+  height = 8.67, 
+  font = "Times"
+  )
+
+par(mfrow = c(2,2))
+plot(zph_quartile_DBP, var = 1:4, plot = TRUE)
+
+par(mfrow = c(2,2))
+plot(zph_quartile_DBP, var = 5:8, plot = TRUE)
+
+## page 3
+par(mfrow = c(2,2))
+plot(zph_quartile_DBP, var = 9:10, plot = TRUE)
+
+dev.off()
+
+img <- image_read_pdf(paste0(output_dir, "/zph_quartile_DBP_schoenfeld_residuals_vs_transformed_time_PH_check.pdf"), density = 300)
+image_write(img, paste0(output_dir, "/zph_quartile_DBP_schoenfeld_residuals_vs_transformed_time_PH_check_300dpi.pdf"), format = "pdf")
+```
+
+Cox regression	Hazard ratio: relative rate of developing T1D at any given age. 
+
+```{r cox_model_base}
+cox_model_base_quartile_25OHD <- survival::coxph(
+  Surv(exit_age, event = event) ~ quartile_25OHD,
+  data = df_cox_full %>% dplyr::select(exit_age, event,quartile_25OHD)
+)
+
+cox_model_base_quartile_DBP <- survival::coxph(
+  Surv(exit_age, event = event) ~ quartile_DBP,
+  data = df_cox_full %>% dplyr::select(exit_age, event, quartile_DBP)
+)
+
+firth_base_quartile_25OHD <- coxphf::coxphf(
+  Surv(exit_age, event) ~ quartile_25OHD,
+  data = df_cox_full %>% 
+    dplyr::select(exit_age, event, quartile_25OHD) %>%
+    tidyr::drop_na()
+  )
+
+firth_base_quartile_DBP <- coxphf::coxphf(
+  Surv(exit_age, event) ~ quartile_DBP,
+  data = df_cox_full %>% 
+    dplyr::select(exit_age, event, quartile_DBP)  %>%
+    tidyr::drop_na()
+  )
+```
+
+
+```{r cox_model_child_confounders}
+cox_model_child_confounders_quartile_25OHD <- survival::coxph(
+  Surv(exit_age, event = event) ~ quartile_25OHD + Season + Sex_cat,
+  data = df_cox_full %>%
+    dplyr::select(
+      exit_age,
+      event,
+      quartile_25OHD,
+      Season,
+      Sex_cat
+    )
+)
+
+cox_model_child_confounders_quartile_DBP <- survival::coxph(
+  Surv(exit_age, event = event) ~ quartile_DBP + Season + Sex_cat,
+  data = df_cox_full %>%     dplyr::select(
+      exit_age,
+      event,
+      quartile_DBP,
+      Season,
+      Sex_cat
+    )
+)
+```
+
+
+```{r firth_model_child_confounders}
+firth_child_confounders_quartile_25OHD <- coxphf::coxphf(
+  Surv(exit_age, event) ~ quartile_25OHD + Season + Sex_cat,
+  data = df_cox_full %>%
+    dplyr::select(
+      exit_age,
+      event,
+      quartile_25OHD,
+      Season,
+      Sex_cat
+    ) %>% tidyr::drop_na(),
+  maxit = 1000,
+  maxstep = 0.01
+)
+
+firth_child_confounders_quartile_DBP <- coxphf::coxphf(
+  Surv(exit_age, event) ~ quartile_DBP + Season + Sex_cat,
+  data = df_cox_full %>%
+    dplyr::select(
+      exit_age,
+      event,
+      quartile_DBP,
+      Preterm_dichotomous,
+      Season,
+      Sex_cat,
+      Birth_weight_cat
+    ) %>% tidyr::drop_na(),
+  maxit = 500,
+  maxstep = 0.10
+)
+```
+
+
+
+```{r cox_model_maternal_confounders}
+cox_model_maternal_confounders_quartile_25OHD <- survival::coxph(
+  Surv(exit_age, event = event) ~ quartile_25OHD + First_degree_T1D_heredity_cat +
+    Smoking_during_pregnancy + Fish_any_pregnancy + Parity + Delivery_mode,
+  data = df_cox_full %>%
+    dplyr::select(
+      exit_age,
+      event,
+      quartile_25OHD,
+      First_degree_T1D_heredity_cat,
+      Smoking_during_pregnancy,
+      Fish_any_pregnancy,
+      Parity,
+      Delivery_mode
+    )
+)
+
+cox_model_maternal_confounders_quartile_DBP <- survival::coxph(
+  Surv(exit_age, event = event) ~ quartile_DBP + First_degree_T1D_heredity_cat +
+    Smoking_during_pregnancy + Fish_any_pregnancy + Parity + Delivery_mode,
+  data = df_cox_full %>% 
+    dplyr::select(
+      exit_age,
+      event,
+      quartile_DBP,
+      First_degree_T1D_heredity_cat,
+      Smoking_during_pregnancy,
+      Fish_any_pregnancy,
+      Parity,
+      Delivery_mode
+    )
+)
+```
+
+
+```{r firth_model_maternal_confounders}
+firth_maternal_confounders_quartile_25OHD <- coxphf::coxphf(
+  Surv(exit_age, event = event) ~ quartile_25OHD + First_degree_T1D_heredity_cat +
+    Smoking_during_pregnancy + Fish_any_pregnancy + Parity + Delivery_mode,
+  data = df_cox_full %>% 
+    dplyr::select(
+      exit_age,
+      event,
+      quartile_25OHD,
+      First_degree_T1D_heredity_cat,
+      Smoking_during_pregnancy,
+      Fish_any_pregnancy,
+      Parity,
+      Delivery_mode
+    ) %>% 
+    tidyr::drop_na()
+)
+
+firth_maternal_confounders_quartile_DBP <- coxphf::coxphf(
+  Surv(exit_age, event = event) ~ quartile_DBP + First_degree_T1D_heredity_cat +
+    Smoking_during_pregnancy + Fish_any_pregnancy + Parity + Delivery_mode,
+  data = df_cox_full %>% 
+    dplyr::select(
+      exit_age,
+      event,
+      quartile_DBP,
+      First_degree_T1D_heredity_cat,
+      Smoking_during_pregnancy,
+      Fish_any_pregnancy,
+      Parity,
+      Delivery_mode
+    ) %>% 
+    tidyr::drop_na()
+)
+```
+
+```{r cox_model_maternal_and_child_confounders}
+cox_model_maternal_and_child_confounders_quartile_25OHD <- survival::coxph(
+  Surv(exit_age, event = event) ~ quartile_25OHD + First_degree_T1D_heredity_cat + 
+    Smoking_during_pregnancy + Fish_any_pregnancy + Parity + Delivery_mode + 
+    Season + Sex_cat,
+  data = df_cox_full %>%
+    dplyr::select(
+      exit_age,
+      event,
+      quartile_25OHD,
+      First_degree_T1D_heredity_cat,
+      Smoking_during_pregnancy,
+      Fish_any_pregnancy,
+      Parity,
+      Delivery_mode,
+      Season,
+      Sex_cat
+    )
+)
+
+cox_model_maternal_and_child_confounders_quartile_DBP <- survival::coxph(
+  Surv(exit_age, event = event) ~ quartile_DBP + First_degree_T1D_heredity_cat +
+    Smoking_during_pregnancy + Fish_any_pregnancy + Parity + Delivery_mode + 
+    Season + Sex_cat,
+  data = df_cox_full %>% 
+    dplyr::select(
+      exit_age,
+      event,
+      quartile_DBP,
+      First_degree_T1D_heredity_cat,
+      Smoking_during_pregnancy,
+      Fish_any_pregnancy,
+      Parity,
+      Delivery_mode,
+      Season,
+      Sex_cat
+    )
+)
+```
+
+```{r firth_model_maternal_and_child_confounders}
+firth_maternal_and_child_confounders_quartile_25OHD <- coxphf::coxphf(
+  Surv(exit_age, event = event) ~ quartile_25OHD + First_degree_T1D_heredity_cat +
+    Smoking_during_pregnancy + Fish_any_pregnancy + Parity + Delivery_mode + 
+    Season + Sex_cat,
+  data = df_cox_full %>% 
+    dplyr::select(
+      exit_age,
+      event,
+      quartile_25OHD,
+      First_degree_T1D_heredity_cat,
+      Smoking_during_pregnancy,
+      Fish_any_pregnancy,
+      Parity,
+      Delivery_mode,
+      Season,
+      Sex_cat
+    ) %>% 
+    tidyr::drop_na()
+)
+
+firth_maternal_and_child_confounders_quartile_DBP <- coxphf::coxphf(
+  Surv(exit_age, event = event) ~ quartile_DBP + First_degree_T1D_heredity_cat +
+    Smoking_during_pregnancy + Fish_any_pregnancy + Parity + Delivery_mode + 
+    Season + Sex_cat,
+  data = df_cox_full %>% 
+    dplyr::select(
+      exit_age,
+      event,
+      quartile_DBP,
+      First_degree_T1D_heredity_cat,
+      Smoking_during_pregnancy,
+      Fish_any_pregnancy,
+      Parity,
+      Delivery_mode,
+      Season,
+      Sex_cat
+    ) %>% 
+    tidyr::drop_na()
+)
+```
+
+
+```{r cox_model_full}
+cox_model_full_quartile_25OHD <- survival::coxph(
+  Surv(exit_age, event = event) ~ quartile_25OHD + First_degree_T1D_heredity_cat +
+    Smoking_during_pregnancy + Fish_any_pregnancy + Parity + Delivery_mode + 
+    Season + Sex_cat + Preterm_dichotomous + Birth_weight_cat,
+  data = df_cox_full %>%
+    dplyr::select(
+      exit_age,
+      event,
+      quartile_25OHD,
+      Preterm_dichotomous,
+      Season,
+      Sex_cat,
+      Birth_weight_cat,
+      First_degree_T1D_heredity_cat,
+      Smoking_during_pregnancy,
+      Fish_any_pregnancy,
+      Parity,
+      Delivery_mode
+    )
+)
+
+cox_model_full_quartile_DBP <- survival::coxph(
+  Surv(exit_age, event = event) ~ quartile_DBP + First_degree_T1D_heredity_cat +
+    Smoking_during_pregnancy + Fish_any_pregnancy + Parity + Delivery_mode +
+    Season + Sex_cat + Preterm_dichotomous + Birth_weight_cat,
+  data = df_cox_full %>%
+    dplyr::select(
+      exit_age,
+      event,
+      quartile_DBP,
+      Preterm_dichotomous,
+      Season,
+      Sex_cat,
+      Birth_weight_cat,
+      First_degree_T1D_heredity_cat,
+      Smoking_during_pregnancy,
+      Fish_any_pregnancy,
+      Parity,
+      Delivery_mode
+    )
+)
+```
+
+
+```{r firth_model_full}
+firth_full_quartile_25OHD <- coxphf::coxphf(
+  Surv(exit_age, event = event) ~ quartile_25OHD + First_degree_T1D_heredity_cat +
+    Smoking_during_pregnancy + Fish_any_pregnancy + Parity + Delivery_mode +
+    Season + Sex_cat + Preterm_dichotomous + Birth_weight_cat,
+  data = df_cox_full %>%
+    dplyr::select(
+      exit_age,
+      event,
+      quartile_25OHD,
+      Preterm_dichotomous,
+      Season,
+      Sex_cat,
+      Birth_weight_cat,
+      First_degree_T1D_heredity_cat,
+      Smoking_during_pregnancy,
+      Fish_any_pregnancy,
+      Parity,
+      Delivery_mode
+    ) %>%
+    tidyr::drop_na(),
+  maxit = 1000,
+  maxstep = 0.01
+)
+
+firth_full_quartile_DBP <- coxphf::coxphf(
+  Surv(exit_age, event = event) ~ quartile_DBP + First_degree_T1D_heredity_cat +
+    Smoking_during_pregnancy + Fish_any_pregnancy + Parity + Delivery_mode +
+    Season + Sex_cat + Preterm_dichotomous + Birth_weight_cat,
+  data = df_cox_full %>%
+    dplyr::select(
+      exit_age,
+      event,
+      quartile_DBP,
+      Preterm_dichotomous,
+      Season,
+      Sex_cat,
+      Birth_weight_cat,
+      First_degree_T1D_heredity_cat,
+      Smoking_during_pregnancy,
+      Fish_any_pregnancy,
+      Parity,
+      Delivery_mode
+    ) %>%
+    tidyr::drop_na(),
+  maxit = 5000,
+  maxstep = 0.01
+)
+```
+
+
+create pattern strings to clean-tidy result tables 
+```{r}
+child_levels <- paste0(
+  paste0(unlist(lapply(c(child_covariates[-2], "Birth_weight_cat", "quartile_25OHD", "quartile_DBP"), function(x)
+  levels(factor(df_cox_full[[x]]))))[-2], collapse = "|"), "|^Preterm$")
+
+child_pat_replace <- paste0(c(child_covariates[-2],"Birth_weight_cat"),collapse = "|")
+```
+
+```{r}
+maternal_levels <- paste0(
+  unique(
+    unlist(
+      lapply(
+        maternal_covariates, 
+        function(x) levels(factor(df_cox_full[[x]]))
+        )
+      )
+    ), 
+  collapse = "|")
+
+maternal_pat_replace <- paste0(maternal_covariates, collapse = "|")
+```
+
+```{r}
+all_levels <- (paste0(paste0(
+  unique(
+    unlist(
+      lapply(
+        c(child_covariates[-2],"Birth_weight_cat",maternal_covariates, "quartile_25OHD", "quartile_DBP"), 
+        function(x) levels(factor(df_cox_full[[x]]))
+        )
+      )
+    )[-2], 
+  collapse = "|"), "|^Preterm$"))
+
+all_pat_replace <- paste0(
+  c(child_covariates[-2],"Birth_weight_cat",maternal_covariates), collapse = "|")
+```
+
+```{r tidy_model_base}
+tidy_cox_model_base_quartile_25OHD <- tidy_base_model(cox_model_base_quartile_25OHD, "Base", "quartile_25OHD")
+tidy_cox_model_base_quartile_DBP <- tidy_base_model(cox_model_base_quartile_DBP, "Base","quartile_DBP")
+
+tidy_firth_base_quartile_25OHD <- tidy_base_model(firth_base_quartile_25OHD, "Base", "quartile_25OHD", firth_model = TRUE)
+tidy_firth_base_quartile_DBP <- tidy_base_model(firth_base_quartile_DBP, "Base","quartile_DBP", firth_model = TRUE)
+```
+
+
+> tidy_firth_base_quartile_25OHD
+# A tibble: 3 × 5
+  Model Term           Level `HR (95% CI)`       `P-value`
+  <chr> <chr>          <chr> <chr>               <chr>    
+1 Base  quartile 25OHD 28–37 1.315 (0.708-2.444) 0.381    
+2 NA    NA             37–52 1.1 (0.592-2.044)   0.760    
+3 NA    NA             >52   1.332 (0.732-2.426) 0.342
+
+
+```{r tidy_model_child_confounders}
+tidy_cox_model_child_confounders_quartile_25OHD <- tidy_model_specific_covariates(
+  model = cox_model_child_confounders_quartile_25OHD,
+  predictor = "quartile_25OHD",
+  model_name = "Base + Child confounders", 
+  covariates_as_pattern = child_pat_replace, 
+  covariate_levels_as_pattern = child_levels
+  )
+
+tidy_cox_model_child_confounders_quartile_DBP <- tidy_model_specific_covariates(
+  model = cox_model_child_confounders_quartile_DBP,
+  predictor = "quartile_DBP",
+  model_name = "Base + Child confounders", 
+  covariates_as_pattern = child_pat_replace, 
+  covariate_levels_as_pattern = child_levels
+  )
+
+tidy_firth_child_confounders_quartile_25OHD <- tidy_model_specific_covariates(
+  model = firth_child_confounders_quartile_25OHD,
+  predictor = "quartile_25OHD",
+  model_name = "Base + Child confounders", 
+  covariates_as_pattern = child_pat_replace, 
+  covariate_levels_as_pattern = child_levels, 
+  firth_model = TRUE
+  )
+
+tidy_firth_child_confounders_quartile_DBP <- tidy_model_specific_covariates(
+  model = firth_child_confounders_quartile_DBP,
+  predictor = "quartile_DBP",
+  model_name = "Base + Child confounders", 
+  covariates_as_pattern = child_pat_replace, 
+  covariate_levels_as_pattern = child_levels, 
+  firth_model = TRUE
+  )
+```
+
+```{r tidy_model_maternal_confounders}
+tidy_cox_model_maternal_confounders_quartile_25OHD <- tidy_model_specific_covariates(
+  model = cox_model_maternal_confounders_quartile_25OHD,
+  predictor = "quartile_25OHD",
+  model_name = "Base + Maternal confounders", 
+  covariates_as_pattern = maternal_pat_replace, 
+  covariate_levels_as_pattern = maternal_levels
+  )
+
+tidy_cox_model_maternal_confounders_quartile_DBP <- tidy_model_specific_covariates(
+  model = cox_model_maternal_confounders_quartile_DBP,
+  predictor = "quartile_DBP",
+  model_name = "Base + Maternal confounders", 
+  covariates_as_pattern = maternal_pat_replace, 
+  covariate_levels_as_pattern = maternal_levels
+  )
+
+tidy_firth_maternal_confounders_quartile_25OHD <- tidy_model_specific_covariates(
+  model = firth_maternal_confounders_quartile_25OHD,
+  predictor = "quartile_25OHD",
+  model_name = "Base + Maternal confounders", 
+  covariates_as_pattern = maternal_pat_replace, 
+  covariate_levels_as_pattern = maternal_levels, 
+  firth_model = TRUE
+  )
+
+tidy_firth_maternal_confounders_quartile_DBP <- tidy_model_specific_covariates(
+  model = firth_maternal_confounders_quartile_DBP,
+  predictor = "quartile_DBP",
+  model_name = "Base + Maternal confounders", 
+  covariates_as_pattern = maternal_pat_replace, 
+  covariate_levels_as_pattern = maternal_levels, 
+  firth_model = TRUE
+  )
+```
+
+```{r tidy_model_maternal_and_child_confounders}
+tidy_cox_model_maternal_and_child_confounders_quartile_25OHD <- tidy_model_specific_covariates(
+  model = cox_model_maternal_and_child_confounders_quartile_25OHD,
+  predictor = "quartile_25OHD",
+  model_name = "Base + Maternal\n + Child confounders", 
+  covariates_as_pattern = all_pat_replace, 
+  covariate_levels_as_pattern = all_levels
+  )
+
+tidy_cox_model_maternal_and_child_confounders_quartile_DBP <- tidy_model_specific_covariates(
+  model = cox_model_maternal_and_child_confounders_quartile_DBP,
+  predictor = "quartile_DBP",
+  model_name = "Base + Maternal\n + Child confounders", 
+  covariates_as_pattern = all_pat_replace, 
+  covariate_levels_as_pattern = all_levels
+  )
+
+tidy_firth_maternal_and_child_confounders_quartile_25OHD <- tidy_model_specific_covariates(
+  model = firth_maternal_and_child_confounders_quartile_25OHD,
+  predictor = "quartile_25OHD",
+  model_name = "Base + Maternal\n + Child confounders", 
+  covariates_as_pattern = all_pat_replace, 
+  covariate_levels_as_pattern = all_levels, 
+  firth_model = TRUE
+  )
+
+tidy_firth_maternal_and_child_confounders_quartile_DBP <- tidy_model_specific_covariates(
+  model = firth_maternal_and_child_confounders_quartile_DBP,
+  predictor = "quartile_DBP",
+  model_name = "Base + Maternal\n + Child confounders", 
+  covariates_as_pattern = all_pat_replace, 
+  covariate_levels_as_pattern = all_levels, 
+  firth_model = TRUE
+  )
+```
+
+```{r tidy_cox_model_full}
+tidy_cox_model_full_quartile_25OHD <- tidy_model_specific_covariates(
+  model = cox_model_full_quartile_25OHD,
+  predictor = "quartile_25OHD",
+  model_name = "Base + All confounders\n + Child mediators", 
+  covariates_as_pattern = all_pat_replace, 
+  covariate_levels_as_pattern = all_levels
+  ) 
+
+tidy_cox_model_full_quartile_DBP <- tidy_model_specific_covariates(
+  model = cox_model_full_quartile_DBP,
+  predictor = "quartile_DBP",
+  model_name = "Base + All confounders\n + Child mediators", 
+  covariates_as_pattern = all_pat_replace, 
+  covariate_levels_as_pattern = all_levels
+  ) 
+
+tidy_firth_full_quartile_25OHD <- tidy_model_specific_covariates(
+  model = firth_full_quartile_25OHD,
+  predictor = "quartile_25OHD",
+  model_name = "Base + All confounders\n + Child mediators", 
+  covariates_as_pattern = all_pat_replace, 
+  covariate_levels_as_pattern = all_levels, 
+  firth_model = TRUE
+  )
+
+tidy_firth_full_quartile_DBP <- tidy_model_specific_covariates(
+  model = firth_full_quartile_DBP,
+  predictor = "quartile_DBP",
+  model_name = "Base + All confounders\n + Child mediators", 
+  covariates_as_pattern = all_pat_replace, 
+  covariate_levels_as_pattern = all_levels, 
+  firth_model = TRUE
+  )
+```
+
+
+
+
+```{r merged_all_model_results_quartile_25OHD }
+merged_all_cox_model_results_quartile_25OHD <-  rbind(
+  tidy_cox_model_base_quartile_25OHD,
+  tidy_cox_model_child_confounders_quartile_25OHD,
+  tidy_cox_model_maternal_confounders_quartile_25OHD,
+  tidy_cox_model_maternal_and_child_confounders_quartile_25OHD,
+  tidy_cox_model_full_quartile_25OHD
+) %>%
+  flextable::flextable() %>%
+  flextable::autofit() %>%
+  flextable::set_table_properties(width = 1, layout = "autofit") %>%
+  flextable::color(
+    i = ~ as.numeric(`P-value`) < 0.05,
+    j = c("Term", "Level", "P-value"),
+    color = "red"
+  )
+
+merged_all_firth_model_results_quartile_25OHD <-  rbind(
+  tidy_firth_base_quartile_25OHD,
+  tidy_firth_child_confounders_quartile_25OHD,
+  tidy_firth_maternal_confounders_quartile_25OHD,
+  tidy_firth_maternal_and_child_confounders_quartile_25OHD,
+  tidy_firth_full_quartile_25OHD
+) %>%
+  flextable::flextable() %>%
+  flextable::autofit() %>%
+  flextable::set_table_properties(width = 1, layout = "autofit") %>%
+  flextable::color(
+    i = ~ as.numeric(`P-value`) < 0.05,
+    j = c("Term", "Level", "P-value"),
+    color = "red"
+  )
+```
+
+```{r merged_all_model_results_quartile_DBP}
+merged_all_cox_model_results_quartile_DBP <-  rbind(
+  tidy_cox_model_base_quartile_DBP,
+  tidy_cox_model_child_confounders_quartile_DBP,
+  tidy_cox_model_maternal_confounders_quartile_DBP, 
+  tidy_cox_model_maternal_and_child_confounders_quartile_DBP,
+  tidy_cox_model_full_quartile_DBP
+) %>%
+  flextable::flextable() %>%
+  flextable::autofit() %>%
+  flextable::set_table_properties(width = 1, layout = "autofit") %>%
+  flextable::color(
+    i = ~ as.numeric(`P-value`) < 0.05,
+    j = c("Term", "Level", "P-value"),
+    color = "red"
+  )
+
+merged_all_firth_model_results_quartile_DBP <-  rbind(
+  tidy_firth_base_quartile_DBP,
+  tidy_firth_child_confounders_quartile_DBP,
+  tidy_firth_maternal_confounders_quartile_DBP,
+  tidy_firth_maternal_and_child_confounders_quartile_DBP,
+  tidy_firth_full_quartile_DBP
+) %>%
+  flextable::flextable() %>%
+  flextable::autofit() %>%
+  flextable::set_table_properties(width = 1, layout = "autofit") %>%
+  flextable::color(
+    i = ~ as.numeric(`P-value`) < 0.05,
+    j = c("Term", "Level", "P-value"),
+    color = "red"
+  )
+```
+
+
+```{r save_merged_all_model_results}
+flextable::save_as_docx(
+  `Cox proportional hazards models: conc. 25(OH)D` = merged_all_cox_model_results_quartile_25OHD,
+  path = paste0(output_dir,"/flex_merged_all_cox_model_results_quartile_25OHD.docx"),
+  pr_section = sect_properties
+)
+
+flextable::save_as_docx(
+  `Cox proportional hazards models: quartile_DBP` = merged_all_cox_model_results_quartile_DBP,
+  path = paste0(output_dir,"/flex_merged_all_cox_model_results_quartile_DBP.docx"),
+  pr_section = sect_properties
+)
+
+flextable::save_as_docx(
+  `Cox proportional hazards models with Firth's Penalized Likelihood: conc. 25(OH)D` = merged_all_firth_model_results_quartile_25OHD,
+  path = paste0(output_dir,"/flex_merged_all_firth_model_results_quartile_25OHD.docx"),
+  pr_section = sect_properties
+)
+
+flextable::save_as_docx(
+  `Cox proportional hazards models with Firth's Penalized Likelihood: quartile_DBP` = merged_all_firth_model_results_quartile_DBP,
+  path = paste0(output_dir,"/flex_merged_all_firth_model_results_quartile_DBP.docx"),
+  pr_section = sect_properties
+)
+```
+
+Cox models to test effect modification by heredity
+
+1. Interaction model (primary test)
+
+```{r}
+cox_model_quartile_25OHD_interaction_heredity <- coxph(Surv(exit_age, event = event) ~ quartile_25OHD * First_degree_T1D_heredity_cat + Smoking_during_pregnancy + Fish_any_pregnancy + Parity + Delivery_mode + Season + Sex_cat,
+  data = df_cox_full %>% 
+    dplyr::select(
+      exit_age,
+      event,
+      quartile_25OHD,
+      First_degree_T1D_heredity_cat,
+      Smoking_during_pregnancy,
+      Fish_any_pregnancy,
+      Parity,
+      Delivery_mode,
+      Season,
+      Sex_cat
+    ) %>% 
+    tidyr::drop_na()
+)
+
+cox_model_quartile_25OHD_interaction_season <- coxph(Surv(exit_age, event = event) ~ quartile_25OHD * Season + Smoking_during_pregnancy + Fish_any_pregnancy + Parity + Delivery_mode + First_degree_T1D_heredity_cat + Sex_cat,
+  data = df_cox_full %>% 
+    dplyr::select(
+      exit_age,
+      event,
+      quartile_25OHD,
+      First_degree_T1D_heredity_cat,
+      Smoking_during_pregnancy,
+      Fish_any_pregnancy,
+      Parity,
+      Delivery_mode,
+      Season,
+      Sex_cat
+    ) %>% 
+    tidyr::drop_na()
+)
+```
+
+```{r}
+cox_model_quartile_DBP_interaction_heredity <- coxph(Surv(exit_age, event = event) ~ quartile_DBP * First_degree_T1D_heredity_cat + Smoking_during_pregnancy + Fish_any_pregnancy + Parity + Delivery_mode + Season + Sex_cat,
+  data = df_cox_full %>% 
+    dplyr::select(
+      exit_age,
+      event,
+      quartile_DBP,
+      First_degree_T1D_heredity_cat,
+      Smoking_during_pregnancy,
+      Fish_any_pregnancy,
+      Parity,
+      Delivery_mode,
+      Season,
+      Sex_cat
+    ) %>% 
+    tidyr::drop_na()
+)
+
+cox_model_quartile_DBP_interaction_season <- coxph(Surv(exit_age, event = event) ~ quartile_DBP * Season + Smoking_during_pregnancy + Fish_any_pregnancy + Parity + Delivery_mode + First_degree_T1D_heredity_cat + Sex_cat,
+  data = df_cox_full %>% 
+    dplyr::select(
+      exit_age,
+      event,
+      quartile_DBP,
+      First_degree_T1D_heredity_cat,
+      Smoking_during_pregnancy,
+      Fish_any_pregnancy,
+      Parity,
+      Delivery_mode,
+      Season,
+      Sex_cat
+    ) %>% 
+    tidyr::drop_na()
+)
+```
+
+
+```{r}
+tab_quartile_25OHD_hered <- make_comp_table(
+  cox_model_maternal_and_child_confounders_quartile_25OHD,
+  cox_model_quartile_25OHD_interaction_heredity,
+  "quartile 25(OH)D × First-degree T1D Heredity"
+)
+
+tab_quartile_25OHD_season <- make_comp_table(
+  cox_model_maternal_and_child_confounders_quartile_25OHD,
+  cox_model_quartile_25OHD_interaction_season,
+  "quartile 25(OH)D × Season"
+)
+
+tab_quartile_DBP_hered <- make_comp_table(
+  cox_model_maternal_and_child_confounders_quartile_DBP,
+  cox_model_quartile_DBP_interaction_heredity,
+  "quartile DBP × First-degree T1D Heredity"
+)
+
+tab_quartile_DBP_season <- make_comp_table(
+  cox_model_maternal_and_child_confounders_quartile_DBP,
+  cox_model_quartile_DBP_interaction_season,
+  "quartile DBP × Season"
+)
+
+anova_interaction_quartile <- rbind(
+  tab_quartile_25OHD_hered,
+  tab_quartile_25OHD_season,
+  tab_quartile_DBP_hered,
+  tab_quartile_DBP_season
+  ) %>%
+  flextable::flextable() %>%
+  flextable::autofit()
+
+flextable::save_as_docx(
+  `Analysis of Deviance Table: Cox model: response is  Surv(time, event)` = anova_interaction_quartile,
+  path = paste0(output_dir,"/anova_interaction_quartile.docx"),
+  pr_section = sect_properties
+)
+```
+
+
+survival curves
+
+```{r}
+plot_base_quartile_25OHD <- survminer::ggadjustedcurves(
+  cox_model_base_quartile_25OHD, 
+  data = df_cox_full %>% dplyr::select(exit_age, event, quartile_25OHD), 
+  variable = "quartile_25OHD",
+  size = 1,                 # change line size
+  palette = c("#E60000", "#E69F00", "#56B4E9", "#009E73"),
+  conf.int = TRUE,          # Add confidence interval
+  pval = TRUE,              # Add p-value
+  risk.table = TRUE,        # Add risk table
+  risk.table.col = "strata",# Risk table color by groups
+  # legend.labs = 
+  #   c("Male", "Female"),    # Change legend labels
+  risk.table.height = 0.25, # Useful to change when you have multiple groups
+  ggtheme = theme_survminer()      # Change ggplot2 theme
+)
+```
+

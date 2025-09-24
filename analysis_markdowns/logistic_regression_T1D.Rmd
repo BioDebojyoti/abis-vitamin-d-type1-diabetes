@@ -1,0 +1,615 @@
+---
+title: "logistic Regression"
+author: "Debojyoti Das"
+date: "2025-07-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+set output directory
+```{r output_dir, message=FALSE, warning=FALSE}
+output_dir <- "/Users/debda22/OneDrive - Linköpings universitet/T1D_vitamin_D_result/logistic_regression"
+
+if(!dir.exists(output_dir)){
+  dir.create(output_dir, recursive = TRUE)
+} else {
+  cat(paste0(output_dir," is already present!!\n"))
+}
+```
+
+load libraries
+```{r load_libraries, message=FALSE, warning=FALSE}
+pacman::p_load(
+  haven,        
+  zoo,
+  sjlabelled,
+  janitor,       
+  data.table,   
+  ggplot2,
+  comprehenr,  
+  stringr,     
+  rstatix,
+  dplyr,
+  tidyr,
+  forcats,
+  officer,
+  cowplot,
+  ggExtra,
+  ggpubr,
+  GGally,
+  janitor,
+  ggrepel,
+  ggtext,
+  parameters,
+  lme4,
+  broom,
+  pscl,
+  tibble,
+  knitr,
+  ggeffects,
+  cobalt,
+  WeightIt,
+  marginaleffects,
+  survival
+  )
+```
+
+define paths
+```{r define_paths, eval=TRUE}
+data_root <- "/Users/debda22/OneDrive - Linköpings universitet/"
+data_root <- paste0(data_root,"Linkoping_projects/ABIS_RAW_DATA_SPSS/")
+```
+
+access helper functions
+```{r load_helper_function}
+source(paste0(data_root,"../../Rmd_and_R_files/T1D_projects/case_control_T1D_vitamin_D_helper.R"))
+```
+
+load factor labels
+```{r load_factor_labels}
+source(paste0(data_root,"../../Rmd_and_R_files/T1D_projects/all_parameters_case_control_T1D_vitamin_D.R"))
+```
+
+read/load vitamin_d_case_control_plus_abis for analysis
+```{r}
+vitamin_d_case_control_plus_abis <- read.table(
+  paste0(
+    data_root,
+    "/vitamin_d/vitamin_d_case_control_plus_abis.csv"
+    )
+)
+```
+
+```{r features2check}
+# categorical features
+features2check <- names(vitamin_d_case_control_plus_abis)[c(6,8:9,13:21)]
+
+# continuous features
+features2check_numeric <- names(vitamin_d_case_control_plus_abis)[c(10:12)]
+```
+
+model baseline factors ~ diagnosis
+```{r}
+univariate_models_25OHD <- complete_case_univariate_logistic_regression(
+  c(features2check, features2check_numeric),
+  vitamin_d_case_control_plus_abis)
+```
+```{r}
+univariate_models_25OHD_flex <- univariate_models_25OHD %>%
+  as.data.frame() %>% dplyr::mutate(term = ifelse(
+    term %in% c("Season", unlist(all_parameters$category_variable), features2check_numeric),
+    gsub("_", " ", gsub(
+      "_pregnancy", " (pregnancy)", gsub("_cat", "", gsub(
+        "_dichotomous",
+        "",
+        gsub(
+          "Gestational_age",
+          "Gestational age (weeks)",
+          gsub(
+            "Birth_height",
+            "Birth height (cm)",
+            gsub("Birth_weight", "Birth weight (kg)", term)
+          )
+        )
+      ))
+    )),
+    paste0("\t", term)
+  )) %>%
+  dplyr::rename(
+    Term = term,
+    No = no,
+    Yes = yes,
+    OR = estimate,
+    `P-value` = p.value,
+    Conf.low = conf.low,
+    Conf.high = conf.high
+  ) %>%
+  dplyr::mutate( 
+    Term = if_else(Term == lag(Term) & row_number() > 1, "", Term)
+  ) %>%
+  flextable::flextable() %>%
+  flextable::autofit() %>%
+  flextable::color(i = ~ !grepl("\t", Term), ~ Term, color = "blue")  %>%
+  flextable::color(i = ~ `P-value` < 0.05,
+                   j = c(1, 4, 5),
+                   color = "red")
+
+univariate_models_25OHD_flex
+```
+
+Fit models: Diagnosis  vitamin D
+
+```{r vitamin_d_models_summary, message=FALSE, warning=FALSE}
+model_base <- glm(diagnosis ~ conc_25OHD, family = "binomial", data = vitamin_d_case_control_plus_abis)
+
+model_maternal <- glm(diagnosis ~ conc_25OHD +
+                        First_degree_T1D_heredity_cat +
+                        Smoking_during_pregnancy +
+                        Vitamin_mineral_supplement_pregnancy +
+                        Fish_any_pregnancy +
+                        Parity +
+                        Delivery_mode,
+                      family = "binomial", data = vitamin_d_case_control_plus_abis)
+
+model_child <- glm(diagnosis ~ conc_25OHD +
+                     Preterm_dichotomous +
+                     Season +
+                     Sex_cat,
+                   family = "binomial", data = vitamin_d_case_control_plus_abis)
+
+model_full <- glm(diagnosis ~ conc_25OHD +
+                    First_degree_T1D_heredity_cat +
+                    Smoking_during_pregnancy +
+                    Vitamin_mineral_supplement_pregnancy +
+                    Fish_any_pregnancy +
+                    Parity +
+                    Delivery_mode +
+                    Preterm_dichotomous +
+                    Season +
+                    Sex_cat,
+                  family = "binomial", data = vitamin_d_case_control_plus_abis)
+```
+
+Fit interaction models
+```{r vitamin_d_interaction_models_summary, message=FALSE, warning=FALSE}
+model_maternal_interaction <- glm(diagnosis ~ conc_25OHD *(
+                        First_degree_T1D_heredity_cat +
+                        Smoking_during_pregnancy +
+                        Vitamin_mineral_supplement_pregnancy +
+                        Fish_any_pregnancy +
+                        Parity +
+                        Delivery_mode),
+                      family = "binomial", data = vitamin_d_case_control_plus_abis)
+
+model_child_interaction <- glm(diagnosis ~ conc_25OHD *(
+                     Preterm_dichotomous +
+                     Season +
+                     Sex_cat),
+                   family = "binomial", data = vitamin_d_case_control_plus_abis)
+
+model_full_interaction <- glm(diagnosis ~ conc_25OHD *(
+                    First_degree_T1D_heredity_cat +
+                    Smoking_during_pregnancy +
+                    Vitamin_mineral_supplement_pregnancy +
+                    Fish_any_pregnancy +
+                    Parity +
+                    Delivery_mode +
+                    Preterm_dichotomous +
+                    Season +
+                    Sex_cat),
+                  family = "binomial", data = vitamin_d_case_control_plus_abis)
+```
+
+```{r vitamin_d_models_summary_merge, message=FALSE, warning=FALSE}
+# Create model list
+model_list <- list(model_base, model_maternal, model_maternal_interaction, model_child, model_child_interaction, model_full, model_full_interaction)
+model_names <- c("Base (25OHD only)",
+                 "Base + Maternal covariates",
+                 "Base * Maternal covariates (interaction model)",
+                 "Base + Child/Perinatal covariates",
+                 "Base * Child/Perinatal covariates (interaction model)",
+                 "Full model",
+                 "Full model (interaction model)")
+
+# Extract OR, CI, R², and AIC
+suppressMessages(summary_table <- lapply(seq_along(model_list), function(i) {
+  model <- model_list[[i]]
+  or_info <- tidy(model, conf.int = TRUE, exponentiate = TRUE) %>%
+    dplyr::filter(term == "conc_25OHD") %>%
+    dplyr::mutate(OR = estimate, CI = paste0("(", round(conf.low, 2), "–", round(conf.high, 2), ")")) %>%
+    dplyr::select(OR, CI)
+  
+  r2_val <- pR2(model)["McFadden"]
+  aic_val <- AIC(model)
+  
+  tibble(
+    Model = model_names[i],
+    `Odds Ratio (25OHD)` = round(or_info$OR, 2),
+    `95% CI (25OHD)` = or_info$CI,
+    `Pseudo-R² (McFadden)` = round(r2_val, 2),
+    AIC = round(aic_val, 1)
+  )
+}) %>%
+  bind_rows())
+```
+
+Summary of Logistic Regression Models for 25(OH)D
+
+```{r vitamin_d_models_summary_display, message=FALSE, warning=FALSE}
+# kable(summary_table, caption = "Summary of Logistic Regression Models for 25OHD")
+summary_table %>%
+  as.data.frame() %>%
+  flextable::flextable() %>%
+  flextable::autofit() 
+```
+
+Prepare data for plotting
+```{r}
+plot_data <- summary_table %>%
+  dplyr::mutate(
+    Model = factor(Model, levels = Model), # preserve order
+    OR = `Odds Ratio (25OHD)`,
+    R2 = `Pseudo-R² (McFadden)`,
+    # Extract lower and upper bounds from CI string "(x–y)"
+    CI_lower = as.numeric(sub(".*\\((.*)–.*", "\\1", `95% CI (25OHD)`)),
+    CI_upper = as.numeric(sub(".*–(.*)\\)", "\\1", `95% CI (25OHD)`))
+  )
+
+plot_data %>%
+  as.data.frame() %>%
+  flextable::flextable() %>%
+  flextable::autofit() 
+```
+
+
+```{r}
+model_plot <- plot_data %>%
+  ggplot(aes(y = Model, x = OR, size = R2, label = Model)) +
+  geom_point(aes(color = Model, size = R2), alpha = 0.7) +
+  geom_pointrange(aes(xmin = CI_lower, xmax = CI_upper, color = Model),alpha = 0.7) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "red") +
+  labs(
+    x = "Odds Ratio (25OHD)",
+    y = "",
+    size = "R²"
+  )  +
+  scale_size_continuous(
+    breaks = c(0.02, 0.04, 0.06,0.08, 0.10, 0.140),
+    range = c(1, 2.2),
+    guide = guide_axis(check.overlap = TRUE)
+  ) +
+  xlim(c(0.70,1.10)) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),   
+    axis.text.y = element_text(hjust = 0),
+    legend.position = "none"
+)
+
+model_plot 
+```
+
+save plots
+```{r warning=FALSE}
+suppressWarnings(
+  ggsave(
+  filename = paste0(output_dir,"/model_OR_25OHD.jpeg"),
+  plot = model_plot,
+  dpi = 300,
+  width = 8.3,
+  height = 11.7,
+  units = "in"
+  )
+)
+```
+
+group prediction probabilities
+```{r}
+groups <- names(model_full_interaction$model)[-c(1, 2, 11)]
+
+plot_group_probs <- vector("list", length = length(groups))
+
+for (iv in seq_along(groups)) {
+  v <- groups[[iv]]
+  
+  pred <- ggpredict(model_full_interaction,
+                    terms = c("conc_25OHD [all]", v, "Sex_cat"))
+  color_text <- gsub("_", " ", gsub("_cat", "", gsub(
+    "_dichotomous",
+    "",
+    gsub(
+      "_during_pregnancy|_any_pregnancy", " (pregnancy)",
+           gsub("Vitamin_mineral_supplement_pregnancy", " Vitamin/mineral\n(pregnancy)",
+                 gsub("First_degree_T1D_heredity_cat", "T1D heredity",v)
+    ))
+  )))
+  title_text <- paste0("Interaction: 25(OH)D × ", color_text, " × Sex")
+  # Plot manually
+  plot_group_probs[[iv]] <- ggplot(pred, aes(x = x, y = predicted, color = group)) +
+    geom_line(size = 1) +
+    facet_wrap(~ facet) +  # Will use v here
+    labs(
+      # x = "Centered 25OHD (nmol/L from mean)",
+      x = "25(OH)D (nmol/L)",
+      y = "Predicted probability of T1D",
+      color = color_text
+      # title = title_text
+    ) +
+    xlim(c(0, 100)) +
+    theme_minimal()
+}
+```
+
+```{r}
+for(iv in seq_along(plot_group_probs)){
+  print(plot_group_probs[[iv]])
+}
+```
+
+save plots
+```{r warning=FALSE}
+cairo_pdf(paste0(output_dir,"/predicted_prob_full_interaction_model.pdf"))
+for(iv in seq_along(plot_group_probs)){
+  print(plot_group_probs[[iv]])
+}
+dev.off()
+```
+
+DBP: Fit models
+```{r DBP_models, message=FALSE, warning=FALSE}
+model_dbp_base <- glm(diagnosis ~ DBP, family = "binomial", data = vitamin_d_case_control_plus_abis)
+
+model_dbp_maternal <- glm(diagnosis ~ DBP +
+                        First_degree_T1D_heredity_cat +
+                        Smoking_during_pregnancy +
+                        Vitamin_mineral_supplement_pregnancy +
+                        Fish_any_pregnancy +
+                        Parity +
+                        Delivery_mode,
+                      family = "binomial", data = vitamin_d_case_control_plus_abis)
+
+model_dbp_child <- glm(diagnosis ~ DBP +
+                     Preterm_dichotomous +
+                     Season +
+                     Sex_cat,
+                   family = "binomial", data = vitamin_d_case_control_plus_abis)
+
+model_dbp_full <- glm(diagnosis ~ DBP +
+                    First_degree_T1D_heredity_cat +
+                    Smoking_during_pregnancy +
+                    Vitamin_mineral_supplement_pregnancy +
+                    Fish_any_pregnancy +
+                    Parity +
+                    Delivery_mode +
+                    Preterm_dichotomous +
+                    Season +
+                    Sex_cat,
+                  family = "binomial", data = vitamin_d_case_control_plus_abis)
+```
+
+DBP : Interaction models
+```{r DBP_interaction_models_summary, message=FALSE, warning=FALSE}
+model_dbp_maternal_interaction <- glm(diagnosis ~ DBP *(
+                        First_degree_T1D_heredity_cat +
+                        Smoking_during_pregnancy +
+                        Vitamin_mineral_supplement_pregnancy +
+                        Fish_any_pregnancy +
+                        Parity +
+                        Delivery_mode),
+                      family = "binomial", data = vitamin_d_case_control_plus_abis)
+
+model_dbp_child_interaction <- glm(diagnosis ~ DBP *(
+                     Preterm_dichotomous +
+                     Season +
+                     Sex_cat),
+                   family = "binomial", data = vitamin_d_case_control_plus_abis)
+
+model_dbp_full_interaction <- glm(diagnosis ~ DBP *(
+                    First_degree_T1D_heredity_cat +
+                    Smoking_during_pregnancy +
+                    Vitamin_mineral_supplement_pregnancy +
+                    Fish_any_pregnancy +
+                    Parity +
+                    Delivery_mode +
+                    Preterm_dichotomous +
+                    Season +
+                    Sex_cat),
+                  family = "binomial", data = vitamin_d_case_control_plus_abis)
+```
+
+DBP: Create model list
+```{r DBP_models_summary_merge, message=FALSE, warning=FALSE}
+model_dbp_list <- list(model_dbp_base, model_dbp_maternal, model_dbp_maternal_interaction, model_dbp_child, model_dbp_child_interaction, model_dbp_full, model_dbp_full_interaction)
+model_dbp_names <- c("Base (DBP only)",
+                 "Base + Maternal covariates",
+                 "Base * Maternal covariates (interaction model)",
+                 "Base + Child/Perinatal covariates",
+                 "Base * Child/Perinatal covariates (interaction model)",
+                 "Full model",
+                 "Full model (interaction model)")
+
+# Extract OR, CI, R², and AIC
+suppressWarnings(
+  summary_dbp_table <- lapply(seq_along(model_dbp_list), function(i) {
+  model <- model_dbp_list[[i]]
+  or_info <- tidy(model, conf.int = TRUE, exponentiate = TRUE) %>%
+    dplyr::filter(term == "DBP") %>%
+    dplyr::mutate(
+      OR = estimate,
+      CI = paste0("(", round(conf.low, 2), "–", round(conf.high, 2), ")")
+    ) %>%
+    dplyr::select(OR, CI)
+  
+  r2_val <- pR2(model)["McFadden"]
+  aic_val <- AIC(model)
+  
+  tibble(
+    Model = model_dbp_names[i],
+    `Odds Ratio (DBP)` = round(or_info$OR, 2),
+    `95% CI (DBP)` = or_info$CI,
+    `Pseudo-R² (McFadden)` = round(r2_val, 2),
+    AIC = round(aic_val, 1)
+  )
+}) %>%
+  bind_rows()
+)
+```
+Summary of Logistic Regression Models for DBP
+```{r dbp_models_summary_display, message=FALSE, warning=FALSE}
+# kable(summary_dbp_table, caption = "Summary of Logistic Regression Models for DBP")
+summary_dbp_table %>%
+  as.data.frame() %>%
+  flextable::flextable() %>%
+  flextable::autofit() 
+```
+
+
+Prepare data for plotting
+```{r}
+plot_data_dbp <- summary_dbp_table %>%
+  dplyr::mutate(
+    Model = factor(Model, levels = Model), # preserve order
+    OR = `Odds Ratio (DBP)`,
+    R2 = `Pseudo-R² (McFadden)`,
+    # Extract lower and upper bounds from CI string "(x–y)"
+    CI_lower = as.numeric(sub(".*\\((.*)–.*", "\\1", `95% CI (DBP)`)),
+    CI_upper = as.numeric(sub(".*–(.*)\\)", "\\1", `95% CI (DBP)`))
+  )
+
+plot_data_dbp  %>%
+  as.data.frame() %>%
+  flextable::flextable() %>%
+  flextable::autofit() 
+```
+
+
+```{r}
+model_dbp_plot <- plot_data_dbp %>%
+  ggplot(aes(y = Model, x = OR, size = R2, label = Model)) +
+  geom_point(aes(color = Model, size = R2), alpha = 0.7) +
+  geom_pointrange(
+    aes(xmin = CI_lower, xmax =  ifelse(CI_upper>3,OR+0.15,CI_upper), 
+        color = Model),alpha = 0.7) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "red") +
+  labs(
+    x = "Odds Ratio (DBP)",
+    y = "",
+    size = "R²"
+  )  +
+  scale_size_continuous(
+    breaks = c(0.02, 0.04, 0.06,0.08, 0.10, 0.120),
+    range = c(1, 2.2) #,
+    # guide = guide_axis(check.overlap = TRUE)
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),   
+    axis.text.y = element_text(hjust = 0),
+    legend.position = "none"
+)
+
+model_dbp_plot 
+```
+
+
+save plots
+```{r}
+ggsave(
+  filename = paste0(output_dir,"/model_OR_DBP.jpeg"),
+  plot = model_dbp_plot,
+  dpi = 300,
+  width = 8.3,
+  height = 11.7,
+  units = "in"
+  )
+```
+
+
+group prediction probabilities DBP
+```{r}
+groups <- names(model_dbp_full_interaction$model)[-c(1, 2, 11)]
+print(groups)
+```
+
+
+```{r}
+plot_group_probs_dbp <- vector("list", length = length(groups))
+
+for (iv in seq_along(groups)) {
+  v <- groups[[iv]]
+  
+  pred_dbp <- ggpredict(model_dbp_full_interaction,
+                    terms = c("DBP [all]", v, "Sex_cat"))
+  color_text <- gsub("_", " ", gsub("_cat", "", gsub(
+    "_dichotomous",
+    "",
+    gsub(
+      "_during_pregnancy|_any_pregnancy", " (pregnancy)",
+           gsub("Vitamin_mineral_supplement_pregnancy", " Vitamin/mineral\n(pregnancy)",
+                 gsub("First_degree_T1D_heredity_cat", "T1D heredity",v)
+    ))
+  )))
+  title_text <- paste0("Interaction: DBP × ", color_text, " × Sex")
+  # Plot manually
+  plot_group_probs_dbp[[iv]] <- ggplot(pred_dbp, aes(x = x, y = predicted, color = group)) +
+    geom_line(size = 1) +
+    facet_wrap(~ facet) +  # Will use v here
+    labs(
+      x = "DBP (\u03bcmol/L)",
+      y = "Predicted probability of T1D",
+      color = color_text
+      # title = title_text
+    ) +
+    xlim(c(0, 10)) +
+    theme_minimal()
+}
+```
+
+```{r}
+for(iv in seq_along(plot_group_probs_dbp)){
+  print(plot_group_probs_dbp[[iv]])
+}
+```
+
+save plots
+```{r}
+cairo_pdf(paste0(output_dir,"/predicted_prob_full_interaction_model_DBP.pdf"))
+for(iv in seq_along(plot_group_probs_dbp)){
+  print(plot_group_probs_dbp[[iv]])
+}
+dev.off()
+```
+
+
+
+glm diagnosis ~ conc_25OHD
+```{r}
+fit_25OHD_no_covariate <- glm(
+    formula = diagnosis ~ conc_25OHD,
+    data = vitamin_d_case_control_plus_abis,
+    family = binomial
+)
+
+results_25OHD_diagnosis_no_covariate <- fit_25OHD_no_covariate %>%
+  broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>%
+  dplyr::mutate_if(is.numeric, function(x)
+    ifelse(x < 0.001, formatC(x, format = "e", 3), round(x, 3))) %>%
+  dplyr::filter(term != "(Intercept)")  %>%
+  dplyr::select(-c("std.error", "statistic")) %>%
+  dplyr::rename(
+    Term = term,
+    OR = estimate,
+    `P-value` = p.value,
+    Conf.low = conf.low,
+    Conf.high =conf.high
+    )
+
+
+results_25OHD_diagnosis_no_covariate  %>%
+  as.data.frame() %>%
+  flextable::flextable() %>%
+  flextable::autofit() 
+```

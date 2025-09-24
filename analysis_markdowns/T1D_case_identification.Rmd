@@ -1,0 +1,2714 @@
+---
+title: "Add diagnosis (T1D)  from medical records and ABIS info to vitamin D data"
+author: "Debojyoti Das"
+date: "2025-05-26"
+output: html_document
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+set output directory
+```{r output_dir, message=FALSE, warning=FALSE}
+output_dir <- "/Users/debda22/OneDrive - Linköpings universitet/T1D_vitamin_D_results/baseline_characteristics"
+
+if(!dir.exists(output_dir)){
+  dir.create(output_dir, recursive = TRUE)
+} else {
+  cat(paste0(output_dir," is already present!!\n"))
+}
+```
+
+load libraries
+```{r load_libraries, message=FALSE, warning=FALSE}
+pacman::p_load(
+  haven,        
+  zoo,
+  sjlabelled,
+  janitor,       
+  data.table,   
+  ggplot2,
+  comprehenr,  
+  stringr,     
+  rstatix,
+  dplyr,
+  tidyr,
+  forcats,
+  officer,
+  cowplot,
+  ggExtra,
+  ggpubr,
+  GGally,
+  janitor,
+  ggrepel,
+  ggtext,
+  parameters,
+  lme4,
+  broom,
+  pscl,
+  tibble,
+  knitr,
+  ggeffects,
+  cobalt,
+  WeightIt,
+  marginaleffects,
+  survival
+  )
+```
+
+define paths
+```{r define_paths, eval=TRUE}
+data_root <- "/Users/debda22/OneDrive - Linköpings universitet/"
+data_root <- paste0(data_root,"Linkoping_projects/ABIS_RAW_DATA_SPSS/")
+```
+
+load parameters
+```{r}
+source(paste0(data_root,"../../Rmd_and_R_files/T1D_projects/all_parameters_case_control_T1D_vitamin_D.R"))
+```
+
+
+```{r read_vitamin_D_data, message=FALSE, warning=FALSE }
+suppressMessages(
+  vitamin_d <- readxl::read_xlsx(
+  paste0(data_root,"vitamin_d/Vitamin_D_16_2023_ABIS.xlsx"))
+)
+vitamin_d <- vitamin_d %>% as.data.frame()
+```
+
+
+```{r vitamin_D_data_rename_columns}
+vitamin_d <- vitamin_d[-c(1,2),-c(1,3,6,7)]
+
+column_names <- c("ABISnr", "DBP", "conc_25OHD")
+names(vitamin_d) <-column_names
+
+head(vitamin_d,4)
+```
+
+
+Read cohort data from SAV format file
+```{r read_abis_data}
+abis <- read_sav(paste0(data_root, "Updated registries/ABIS_Database_Updated_240124.sav"))
+```
+
+
+Variable names and labels
+```{r extract_abis_colname_description}
+column_names <- names(abis)
+label <- to_vec(
+  for (i in seq_along(column_names))
+    if (
+      (!is.null(
+        attr(abis[[column_names[i]]], "label")
+        )
+       )&(
+         length(attr(abis[[column_names[i]]], "label")) == 1)
+      ) attr(abis[[column_names[i]]], "label")
+  else column_names[i])
+
+abis_info <- data.frame(
+  name = column_names,
+  label = label
+)
+```
+
+
+```{r extract_T1D_question_columns}
+T1D_first_order_heridity <- abis_info %>%
+  dplyr::mutate(
+    T1D_info = ifelse(
+      grepl("type 1 Diabetes",label,ignore.case = TRUE),label,NA)) %>%
+  dplyr::filter(
+    (!is.na(T1D_info))&(!grepl("grand", T1D_info, ignore.case=TRUE))
+    ) #%>%
+  # dplyr::filter(
+  #   (!is.na(T1D_info)) & grepl("suffer", T1D_info) &
+  #     (!grepl("screen|test", T1D_info, ignore.case = TRUE) &
+  #        (!grepl("does not know", T1D_info, ignore.case = TRUE))
+  #      )
+  #   )
+
+str(T1D_first_order_heridity)
+```
+season of birth
+```{r add_season_of_birth}
+abis <- abis %>%
+  dplyr::mutate(
+    child_dob = as.Date(
+      as.yearmon(as.character(barn_år_mån), format = "%Y%m")
+      )
+    ) %>%
+  dplyr::mutate(
+    month_num = lubridate::month(child_dob),
+    Season = dplyr::case_when(
+      month_num %in% c(12, 1, 2)  ~ "Winter",
+      month_num %in% c(3, 4, 5)   ~ "Spring",
+      month_num %in% c(6, 7, 8)   ~ "Summer",
+      month_num %in% c(9, 10, 11) ~ "Autumn"
+   )
+  ) %>%
+  dplyr::select(-all_of(c("barn_år_mån", "month_num")))
+```
+
+<!-- composite_T1D_heredity = fr_15f_1 mother with T1D -->
+<!-- composite_T1D_heredity = pmax(fr_15f_1, fr_15f_2, fr_15f_3, na.rm = TRUE)) mother/ father/ sibling -->
+
+```{r add_T1D_heredity}
+abis <- abis %>% 
+  dplyr::mutate(across(c(fr_15f_1, fr_15f_2, fr_15f_3), ~ as.numeric(.))) %>%
+  dplyr::mutate(
+    composite_T1D_heredity = pmax(fr_15f_1, fr_15f_2, fr_15f_3, na.rm = TRUE)
+    ) %>%
+    # composite_T1D_heredity = fr_15f_1) %>% 
+  dplyr::mutate(
+    first_degree_T1D_heredity = ifelse(!is.na(composite_T1D_heredity),composite_T1D_heredity,NA_integer_)
+  ) 
+```
+
+```{r remove_attributes_to_preserve_data_frame_class, echo=FALSE}
+for(col in names(abis)){
+  for(atr in c("label","format.spss","display_width","labels")){
+    attr(abis[[col]], atr) <- NULL
+  }
+}
+```
+
+```{r select_columns_of_interest}
+abis <- abis %>% dplyr::select(
+  ABISnr,
+  child_dob,
+  first_degree_T1D_heredity,
+  # fr_15f_1, # Inheritance, T1D mom
+  # fr_15f_2, # Inheritance, T1D dad
+  # fr_15f_3, # Inheritance, T1D siblings
+  fr_18,    # Did you smoke during your pregnancy
+  # fr_18a,  # If yes, how many cigarettes per day?
+  parity,  # 0 = "first parity", 1 = "previous parity"
+  fr_81,   # Did you use any vitamins or mineral supplement during your pregnancy?
+  fr_91,   # How often did you eat lake fish?
+  fr_92,   # How often did you eat Baltic fish ?
+  fr_93,   # How often did you eat other fish?
+  # fr_92_93_sum_recoded,  # mother during pregnancy: index of long chain omega3 intake based on fish intake
+  fr_12,   # Week of delivery
+  fr_13,   # The way of delivery
+  fr_14,   # birth weight
+  fr_14a,  # birth length
+  Season,
+  Gender
+) %>%
+  dplyr::mutate(across(c(fr_91, fr_92, fr_93), ~ as.numeric(.))) %>%
+  dplyr::mutate(
+    fish_intake_frequency = pmin(
+      fr_91, 
+      fr_92, 
+      fr_93, 
+      na.rm = TRUE)
+  )
+```
+
+
+access helper functions
+```{r load_helper_function}
+source("case_control_T1D_vitamin_D_helper.R")
+```
+
+load factor labels
+```{r load_factor_labels}
+source("all_parameters_case_control_T1D_vitamin_D.R")
+```
+
+remove vitamin supplement "Do not know"
+```{r}
+abis <- abis %>%
+  dplyr::mutate(
+    fr_81 = ifelse(
+      is.na(fr_81) | fr_81 == 3,
+      NA,
+      fr_81)
+  )
+```
+
+
+```{r categorise_variables_with_proper_labels}
+for (cv in unlist(all_parameters$category_variable)){
+  
+  curr_parameters <- all_parameters[all_parameters$category_variable == cv,]
+  abis <- categorise_variable(abis,
+                          variable2categorise = curr_parameters$variable2categorise[[1]],
+                          category_variable = curr_parameters$category_variable[[1]],
+                          breaks = curr_parameters$breaks[[1]],
+                          labels = curr_parameters$labels[[1]]
+)
+  abis[[cv]] <- droplevels(abis[[cv]])
+}
+```
+
+reorder some factors
+```{r reorder_some_factors1}
+abis$Fish_lake_pregnancy <- factor(
+  abis$Fish_lake_pregnancy,
+  levels = rev(c("Every day", "3\u20135 times/week", "1\u20132 times week", "Seldom")))
+
+abis$Fish_Baltic_pregnancy <- factor(
+  abis$Fish_Baltic_pregnancy,
+  levels = rev(c("Every day", "3\u20135 times/week", "1\u20132 times week", "Seldom")))
+
+abis$Fish_other_pregnancy <- factor(
+  abis$Fish_other_pregnancy,
+  levels = rev(c("Every day", "3\u20135 times/week", "1\u20132 times week", "Seldom")))
+
+abis$Fish_any_pregnancy <- factor(
+  abis$Fish_any_pregnancy,
+  levels = rev(c("Every day", "3\u20135 times/week", "1\u20132 times week", "Seldom")))
+```
+
+```{r reorder_some_factors2}
+abis$Fish_lake_pregnancy <- forcats::fct_collapse(
+  abis$Fish_lake_pregnancy,
+  "1–2 times week or more" = c("Every day", "3–5 times/week", "1–2 times week")
+)
+
+abis$Fish_Baltic_pregnancy <- forcats::fct_collapse(
+  abis$Fish_Baltic_pregnancy,
+  "1–2 times week or more" = c("Every day", "3–5 times/week", "1–2 times week")
+)
+
+abis$Fish_other_pregnancy <- forcats::fct_collapse(
+  abis$Fish_other_pregnancy,
+  "1–2 times week or more" = c("Every day", "3–5 times/week", "1–2 times week")
+)
+
+abis$Fish_any_pregnancy <- forcats::fct_collapse(
+  abis$Fish_any_pregnancy,
+  "1–2 times week or more" = c("Every day", "3–5 times/week", "1–2 times week")
+)
+```
+
+
+```{r rename_columns}
+abis["Gestational_age"] <- abis$fr_12 
+abis["Birth_weight"] <- abis$fr_14 
+abis["Birth_length"] <- abis$fr_14a 
+```
+
+```{r select_renamed_columns}
+abis <- abis %>% dplyr::select(all_of(
+  c(
+    "ABISnr",
+    "child_dob",
+    "First_degree_T1D_heredity_cat",
+    "Preterm_group",
+    "Preterm_dichotomous",
+    "Delivery_mode",
+    "Gestational_age",
+    "Birth_weight",
+    "Birth_length",
+    "Season",
+    "Parity",
+    "Smoking_during_pregnancy",
+    "Vitamin_mineral_supplement_pregnancy",
+    "Fish_lake_pregnancy",
+    "Fish_Baltic_pregnancy",
+    "Fish_other_pregnancy",
+    "Fish_any_pregnancy",
+    "Sex_cat"
+  )
+))
+
+abis <- as.data.frame(abis)
+```
+
+
+```{r set_season_reference_level}
+abis$Season <- factor(
+  abis$Season, levels = c("Autumn", "Spring", "Summer", "Winter")
+  )
+```
+
+Diagnosis from NPR
+```{r read_diagnosis_NPR}
+OV_NPR_ORIGINAL <- read_sav(paste0(
+  data_root,
+  "Updated registries/OV_ABISnr_updated_20240301.sav"
+))
+SV_NPR_ORIGINAL <- read_sav(paste0(
+  data_root,
+  "Updated registries/SV_ABISnr_updated _20240301.sav"
+))
+```
+
+
+```{r reformat_diagnosis_data_NPR}
+SV_NPR <- SV_NPR_ORIGINAL %>%  
+  dplyr::mutate(daywise_all_diagnosis = paste(HDIA,DIAGNOS, sep = " ")) %>%
+  dplyr::mutate(daywise_all_diagnosis = gsub(replacement = ",",
+                                      pattern = " ",
+                                      x = daywise_all_diagnosis)) %>% 
+  dplyr::group_by(ABISnr) %>% 
+  dplyr::summarise(ABISnr_all_diagnosis = paste0(daywise_all_diagnosis, 
+                                         collapse = ",")) %>%
+  dplyr::select(ABISnr,ABISnr_all_diagnosis)
+
+OV_NPR <- OV_NPR_ORIGINAL %>%  
+  dplyr::mutate(daywise_all_diagnosis = paste(HDIA,DIAGNOS, sep = " ")) %>%
+  dplyr::mutate(daywise_all_diagnosis = gsub(replacement = ",",
+                                      pattern = " ",
+                                      x = daywise_all_diagnosis)) %>% 
+  dplyr::group_by(ABISnr) %>% 
+  dplyr::summarise(ABISnr_all_diagnosis = paste0(daywise_all_diagnosis, 
+                                         collapse = ","))  %>%
+  dplyr::select(ABISnr,ABISnr_all_diagnosis)
+
+diagnosis_SV_OV <- dplyr::full_join(SV_NPR, 
+                             OV_NPR, 
+                             by = "ABISnr",
+                             suffix = c("_SV","_OV")
+                             ) %>%
+  dplyr::mutate(all_diagnosis = 
+           paste(ABISnr_all_diagnosis_SV, 
+                 ABISnr_all_diagnosis_OV, ",")) %>%
+  dplyr::mutate(all_diagnosis = gsub(replacement = "",
+                                      pattern = "NA ",
+                                      x = all_diagnosis))
+```
+
+
+
+```{r get_diagnosis}
+complete_diagnosis_SV_OV_psoriasis_or_ibd <- diagnosis_SV_OV %>%
+dplyr::filter(grepl("L40|K50|K51|K523", all_diagnosis, ignore.case = TRUE)) %>%
+dplyr::select(ABISnr, all_diagnosis) %>%
+dplyr::mutate(Diagnos = sapply(all_diagnosis, function(x) {
+    y <- strsplit(gsub(" ",",",x), ",")[[1]]
+    match <- grep("L40|K50|K51|K523", y, ignore.case = TRUE)
+if (length(match) > 0) return(y[match]) else return(NA)
+}),
+count =sapply(Diagnos, function(x) length(x)),
+Autoimmune_diagnoses = sapply(Diagnos, function(x) paste0(x, collapse = "|")),
+Diagnos = ifelse(count>0,"psoriasis_or_ibd",NA_character_),
+all_diagnosis = sapply(all_diagnosis, function(x) paste0(base::strsplit(x,",")[[1]], collapse = "|"))
+)
+```
+
+Type 1 Diabetes
+
+```{r get_T1D_diagnosis}
+complete_diagnosis_SV_OV_T1D <- diagnosis_SV_OV %>%
+dplyr::filter(grepl("E10", all_diagnosis, ignore.case = TRUE)) %>%
+dplyr::select(ABISnr, all_diagnosis) %>%
+dplyr::mutate(Diagnos = sapply(all_diagnosis, function(x) {
+    y <- strsplit(gsub(" ",",",x), ",")[[1]]
+    match <- grep("E10", y, ignore.case = TRUE)
+if (length(match) > 0) return(y[match]) else return(NA)
+}),
+count =sapply(Diagnos, function(x) length(x)),
+Diabetes_diagnoses = sapply(Diagnos, function(x) paste0(x, collapse = "|")),
+Diagnos = ifelse(count>0,"E10",NA_character_),
+all_diagnosis = sapply(all_diagnosis, function(x) paste0(base::strsplit(x,",")[[1]], collapse = "|"))
+)
+```
+
+<!-- save: do not delete -->
+```{r save_diagnosis, include=FALSE}
+# writexl::write_xlsx(
+#   complete_abis_diagnosis_T1D,
+#   paste0(
+#     data_root,
+#     "vitamin_d/t1d_diagnosis_from_sv_and_ov_npr.xlsx"
+#   )
+# )
+```
+
+Type 2 Diabetes
+
+```{r get_T2D_diagnosis}
+complete_diagnosis_SV_OV_T2D <- diagnosis_SV_OV %>%
+  dplyr::filter(grepl("E11", all_diagnosis, ignore.case = TRUE)) %>%
+  dplyr::select(ABISnr, all_diagnosis) %>%
+  dplyr::mutate(
+    Diagnos = sapply(all_diagnosis, function(x) {
+      y <- strsplit(gsub(" ", ",", x), ",")[[1]]
+      match <- grep("E11", y, ignore.case = TRUE)
+      if (length(match) > 0)
+        return(y[match])
+      else
+        return(NA)
+    }),
+    count = sapply(Diagnos, function(x)
+      length(x)),
+    Diabetes_diagnoses = sapply(Diagnos, function(x)
+      paste0(x, collapse = "|")),
+    Diagnos = ifelse(count > 0, "E11", NA_character_),
+    all_diagnosis = sapply(all_diagnosis, function(x)
+      paste0(base::strsplit(x, ",")[[1]], collapse = "|"))
+  )
+```
+
+T1D cases from sv/OV NPR no overlapping T2D/ psoriais/ IBD
+```{r get_individual_diagnosis_list}
+T1D_abis_list <- complete_diagnosis_SV_OV_T1D$ABISnr
+T2D_abis_list <- complete_diagnosis_SV_OV_T2D$ABISnr
+psoriais_or_ibd_abis_list <- complete_diagnosis_SV_OV_psoriasis_or_ibd$ABISnr
+```
+
+
+```{r diagnosis_list_overlap_check}
+T1D_abis_list_clean <- T1D_abis_list[!(T1D_abis_list %in% c(T2D_abis_list,psoriais_or_ibd_abis_list))]
+T2D_abis_list_clean <- T2D_abis_list[!(T2D_abis_list %in% c(T1D_abis_list,psoriais_or_ibd_abis_list))]
+psoriais_or_ibd_abis_list_clean <- psoriais_or_ibd_abis_list[!(psoriais_or_ibd_abis_list %in% c(T1D_abis_list,T2D_abis_list))]
+```
+
+
+```{r extract_T1D_first_diagnosis}
+T1D_first_diagnosis <- rbind(
+  OV_NPR_ORIGINAL %>%
+    dplyr::mutate(UTDATUMA = NA_character_, SOURCE = "OV_20240301") %>%
+    dplyr::select(all_of(
+      c("ABISnr", "HDIA", "DIAGNOS", "INDATUMA", "UTDATUMA", "SOURCE")
+    ))
+  ,
+  SV_NPR_ORIGINAL %>%
+    dplyr::mutate(SOURCE = "SV_20240301") %>%
+    dplyr::select(all_of(
+      c("ABISnr", "HDIA", "DIAGNOS", "INDATUMA", "UTDATUMA", "SOURCE")
+    ))
+) %>%
+  dplyr::filter(grepl("E10", HDIA) | grepl("E10", DIAGNOS)) %>%
+  dplyr::mutate(INDATUMA = as.Date(INDATUMA, format = "%Y%m%d")) %>%
+  dplyr::arrange(ABISnr, INDATUMA) %>%
+  dplyr::group_by(ABISnr) %>%
+  dplyr::slice_head(n = 1) %>%
+  dplyr::ungroup()
+```
+
+
+```{r remove_attributes_from_T1D_first_diagnosis}
+for(col in names(T1D_first_diagnosis)){
+  for(atr in c("label","format.spss","display_width")){
+    attr(T1D_first_diagnosis[[col]], atr) <- NULL
+  }
+}
+T1D_first_diagnosis <- as.data.frame(T1D_first_diagnosis)
+```
+
+
+```{r check_str_of_T1D_first_diagnosis}
+str(T1D_first_diagnosis)
+```
+
+```{r include=FALSE}
+# E10_and_sv_ov_npr <- E10 %>% 
+#   dplyr::mutate(
+#     t1d_same_diagnosis_in_ov_and_sv_npr = ifelse(
+#       `ABISnr T1D(Cord Blood)` %in% complete_abis_diagnosis$ABISnr, TRUE, FALSE)
+#     )
+```
+
+<!-- do not delete -->
+```{r include=FALSE}
+# writexl::write_xlsx(
+#   E10_and_sv_ov_npr,
+#   paste0(data_root,"vitamin_d/comparison_sv_ov_npr_vs_t1d_abis_indusmita.xlsx")
+# )
+```
+
+```{r classify_samples_in_vitamin_D_data_by_diagnosis}
+vitamin_d_case_control <- vitamin_d %>%
+  dplyr::mutate(diagnosis = ifelse(
+    !(
+      ABISnr %in% c(T1D_abis_list, T2D_abis_list, psoriais_or_ibd_abis_list)
+    ),
+    "control",
+    ifelse(
+      ABISnr %in% T1D_abis_list &
+        ABISnr %in% T2D_abis_list,
+      "T1D and T2D",
+      ifelse(
+        ABISnr %in% T1D_abis_list &
+          ABISnr %in% psoriais_or_ibd_abis_list,
+        "IBD/PSORIASIS and T1D",
+        ifelse(
+          ABISnr %in% T2D_abis_list &
+            ABISnr %in% psoriais_or_ibd_abis_list,
+          "IBD/PSORIASIS and T2D",
+          ifelse(
+            ABISnr %in% T1D_abis_list_clean,
+            "T1D",
+            ifelse(
+              ABISnr %in% T2D_abis_list_clean,
+              "T2D",
+              ifelse(
+                ABISnr %in% psoriais_or_ibd_abis_list_clean,
+                "IBD/PSORIASIS",
+                NA_character_
+              )
+            )
+          )
+        )
+      )
+    )
+  ))
+```
+
+convert2numeric
+```{r function_to_convert_entries_with_symbols_to_numbers}
+convert2numeric <- function(v) {
+  if (grepl("<", v)) {
+    v <- gsub("<", "", v)
+    return(as.numeric(v) / sqrt(2))
+  } else {
+    return(as.numeric(v))
+  }
+}
+```
+
+```{r convert_entries_with_symbols_to_numbers}
+vitamin_d_case_control <- vitamin_d_case_control %>% 
+  dplyr::mutate(
+    conc_25OHD = sapply(conc_25OHD, convert2numeric), 
+    DBP = sapply(DBP, convert2numeric)
+    )
+```
+
+add abis data to vitamin d data
+```{r join_abis_data_to_vitamin_D_data}
+vitamin_d_case_control_plus_abis <- dplyr::left_join(
+  vitamin_d_case_control,
+  abis %>% dplyr::mutate(ABISnr=as.character(ABISnr)),
+  by = "ABISnr"
+)
+```
+
+
+```{r extract_only_T1D_and_controls}
+vitamin_d_case_control_plus_abis <- vitamin_d_case_control_plus_abis %>% 
+    dplyr::filter(diagnosis %in% c("T1D","control"))
+```
+
+
+```{r remove_unnecessary_attributes}
+for(col in c("DBP", "25OHD")){
+  for(atr in c("names")){
+    attr(vitamin_d_case_control_plus_abis[[col]], atr) <- NULL
+  }
+}
+```
+
+add first diagnosis dates
+```{r add_first_diagnosis_dates}
+vitamin_d_case_control_plus_abis <- dplyr::left_join(
+  vitamin_d_case_control_plus_abis,
+  T1D_first_diagnosis %>% 
+    dplyr::mutate(ABISnr=as.character(ABISnr)),
+  by = "ABISnr"
+)
+```
+
+clear space
+```{r clean_space}
+objs <- ls(envir = .GlobalEnv)
+obj_sizes <- sapply(objs, function(x) object.size(get(x, envir = .GlobalEnv)))
+obj_sizes_sorted <- sort(obj_sizes, decreasing = TRUE)
+
+# Print nicely
+print(data.frame(
+  Object = names(obj_sizes_sorted),
+  Size_MB = round(obj_sizes_sorted / 1024^2, 2)
+), row.names = FALSE)
+```
+
+save some space
+```{r save_some_space}
+rm(
+  list = c(
+    "T1D_first_diagnosis",
+    "abis",
+    "OV_NPR_ORIGINAL",
+    "SV_NPR_ORIGINAL",
+    "SV_NPR",
+    "OV_NPR",
+    "abis_info"
+  ),
+  envir = .GlobalEnv
+)
+```
+
+
+```{r onset_age_group}
+vitamin_d_case_control_plus_abis <- vitamin_d_case_control_plus_abis %>%
+  dplyr::mutate(
+    T1D_age_diagnosis = round(
+      lubridate::time_length(difftime(INDATUMA,child_dob), "years"),
+      2),
+    onset_age_group = dplyr::case_when(
+      T1D_age_diagnosis < 6 ~ "Early onset",
+      T1D_age_diagnosis >= 6 &  T1D_age_diagnosis <= 12 ~  "School-age",
+      T1D_age_diagnosis > 12 &  T1D_age_diagnosis < 16 ~  "Puberty-onset",
+      T1D_age_diagnosis > 16 ~ "Young-adult",
+      TRUE ~ "Healthy"
+    )
+  ) %>%
+  dplyr::mutate(
+    Birth_weight = Birth_weight/1000
+  ) %>%
+  dplyr::rename(
+    Birth_height = Birth_length
+  )
+```
+
+```{r}
+birth_weight_quantiles <- quantile(vitamin_d_case_control_plus_abis$Birth_weight, na.rm=TRUE)
+
+vitamin_d_case_control_plus_abis$Birth_weight_cat <- cut(
+  vitamin_d_case_control_plus_abis$Birth_weight,
+  breaks = c(
+    birth_weight_quantiles[[1]],
+    birth_weight_quantiles[[2]],
+    birth_weight_quantiles[[3]],
+    birth_weight_quantiles[[4]],
+    Inf
+  ),
+  labels = c("q1", "q2", "q3", "q4"),
+  include.lowest = TRUE
+)
+```
+
+remove attributes
+```{r remove_attributes_from_data}
+for(col in c("conc_25OHD", "adjusted_25OHD")){
+  attr(vitamin_d_case_control_plus_abis[[col]], "names") <- NULL  
+}
+
+vitamin_d_case_control_plus_abis <- as.data.frame(vitamin_d_case_control_plus_abis)
+```
+
+```{r set_reference_level_onset_age_group}
+vitamin_d_case_control_plus_abis$onset_age_group <- factor(
+  vitamin_d_case_control_plus_abis$onset_age_group, 
+  levels = c("Early onset", "School-age", "Puberty-onset", "Young-adult")) 
+```
+
+```{r features2check}
+features2check <- names(vitamin_d_case_control_plus_abis)[c(6,8:9,13:21)]
+```
+
+categorical features
+```{r, categorical_features, message=FALSE, warning=FALSE}
+for(m in seq_along(features2check)){
+  
+    v <- features2check[[m]]
+    
+    curr_count_raw <- vitamin_d_case_control_plus_abis %>%
+      janitor::tabyl(!!sym(v), diagnosis) 
+    
+    # Transpose to make rows = group, columns = levels
+    contingency <- as.table(as.matrix(curr_count_raw[, c("control", "T1D")]))
+    rownames(contingency) <- curr_count_raw[[v]]
+    contingency <- t(contingency)
+    # chi-squared test
+    result <- chisq.test(contingency)
+    curr_count_raw["P.value"] <- NA_real_
+    if(is.na(result$p.value)){
+      curr_count_raw[["P.value"]][1] <- NA_real_
+    } else {
+          curr_count_raw[["P.value"]][1] <- if (result$p.value < 0.001) {
+            formatC(result$p.value, format = "e", digits = 2)  
+          } else {
+              round(result$p.value,3)
+            }
+    }
+
+    curr_count <- curr_count_raw %>% 
+      dplyr::mutate(
+        control_perc = round(control/sum(control)*100,2), 
+        T1D_perc = round(T1D/sum(T1D)*100,2)) %>% 
+      dplyr::mutate(
+        control=paste0(control," (",control_perc,")"), 
+        T1D = paste0(T1D," (",T1D_perc,")")
+        ) %>%
+      dplyr::select(-all_of(c("control_perc","T1D_perc")))
+    
+    names(curr_count) <- c("Feature", "control", "T1D","P.value")
+    
+    curr_table <- data.frame(
+      Feature = character(), 
+      control = character(), 
+      T1D = character(), 
+      P.value = double()
+      )
+    
+    curr_table[1,] <- c(v,NA_character_,NA_character_,NA_real_)
+    table2add <-rbind(curr_table, curr_count)
+    if(m==1){
+      final_table_cat <- table2add
+    } else {
+      final_table_cat <- rbind(final_table_cat,table2add)
+    }
+}
+```
+
+continuous features
+```{r continuous_features}
+features2check_numeric <- names(vitamin_d_case_control_plus_abis)[c(10:12)]
+```
+
+```{r, final_table_numeric, message=FALSE, warning=FALSE}
+for(m in seq_along(features2check_numeric)){
+  
+    v <- features2check_numeric[[m]]
+    
+    curr_summary_raw <- vitamin_d_case_control_plus_abis %>% 
+      dplyr::group_by(diagnosis) %>% 
+      dplyr::summarise(
+        mean = mean(!!sym(v), na.rm = TRUE), 
+        sd = sd(!!sym(v), na.rm = TRUE)
+        ) %>% 
+      as.data.frame() %>%
+      dplyr::mutate(
+        stats = paste0(as.character(round(mean,2))," (",as.character(round(sd,2)),")")
+      ) %>%
+      dplyr::select(-all_of(c("mean","sd")))
+    
+    curr_summary <- data.frame(
+      Feature=v,
+      control=curr_summary_raw$stats[2],
+      T1D=curr_summary_raw$stats[1]
+      )
+    
+    # wilcox test
+    formula2use = paste0(v," ~ diagnosis")
+    df <- vitamin_d_case_control_plus_abis %>%
+      dplyr::select(diagnosis, !!sym(v)) 
+                    
+    wilcox_result <- rstatix::wilcox_test(
+      data = df,
+      formula = as.formula(formula2use),
+      p.adjust.method = "BH"
+      )
+    
+    
+    curr_summary["P.value"] <- NA_real_
+    if(is.na(wilcox_result$p)){
+      curr_summary[["P.value"]][1] <- NA_real_
+    } else {
+          curr_summary[["P.value"]][1] <- if (wilcox_result$p < 0.001) {
+            formatC(wilcox_result$p, format = "e", digits = 2)  
+          } else {
+              round(wilcox_result$p,3)
+            }
+    }
+
+    if(m==1){
+      final_table_numeric <- curr_summary
+    } else {
+      final_table_numeric <- rbind(final_table_numeric,curr_summary)
+    }
+}
+```
+
+```{r final_table_cat}
+final_table_cat <- final_table_cat %>%
+  dplyr::mutate(Feature = ifelse(
+    Feature %in% features2check,
+    Feature,
+    ifelse(is.na(Feature), "\tMissing", paste0("\t", Feature))
+  )) %>%
+  dplyr::mutate(Feature = gsub("_", " ", gsub(
+    "_pregnancy", " (pregnancy)", gsub("_cat", "", 
+                                        gsub("_dichotomous", "", Feature)
+              )
+          )
+      )
+  )
+```
+
+
+concatenate tables for both set of features
+```{r final_table_cat_numeric}
+final_table_cat_numeric <- rbind(
+  data.frame(
+    Feature = "Categorical variable count (%)",
+    control = NA_character_,
+    T1D = NA_character_,
+    P.value = NA_real_
+  ),
+  final_table_cat,
+  data.frame(
+    Feature = "Continuous variable mean (sd)",
+    control = NA_character_,
+    T1D = NA_character_,
+    P.value = NA_real_
+  ),
+  final_table_numeric
+)  %>%
+  dplyr::mutate(Feature = gsub(
+    "Gestational_age",
+    "Gestational age (weeks)",
+    gsub(
+      "Birth_height",
+      "Birth height (cm)",
+      gsub("Birth_weight", "Birth weight (kg)", Feature)
+    )
+  )) %>%
+  flextable::flextable() %>%
+  flextable::color(i = ~ Feature == "\tMissing",
+                   j = "Feature",
+                   color = "red") %>%
+  flextable::color(
+    i = ~ grepl("Continuous variable|Categorical variable", Feature),
+    j = "Feature",
+    color = "blue"
+  ) %>%
+  flextable::autofit()
+```
+
+```{r word_sect_properties}
+# sect_properties <- prop_section(
+#   page_size = page_size(
+#     orient = "landscape",
+#     width = 8.3,
+#     height = 11.7
+#   ),
+#   type = "continuous",
+#   page_margins = page_mar()
+# )
+
+sect_properties <- prop_section(
+  page_size = page_size(
+    orient = "landscape",
+    width = 11.7,
+    height = 8.3
+  ),
+  page_margins = page_mar(
+    top = 0.5,
+    bottom = 0.5,
+    left = 0.5,
+    right = 0.5,
+    header = 0.3,
+    footer = 0.3,
+    gutter = 0
+  ),
+  type = "continuous"
+)
+```
+
+
+```{r save_baseline_characteristics_table}
+flextable::save_as_docx(
+  `baseline characteristics table` = final_table_cat_numeric,
+  path = paste0(output_dir,"/baseline_characteristics_table.docx"),
+  pr_section = sect_properties
+)
+```
+
+plot
+```{r df_height_weight}
+df_height_weight <- vitamin_d_case_control_plus_abis %>% 
+  dplyr::select(diagnosis, Birth_weight, Birth_height) %>%
+  dplyr::rename(
+    `Height (cm) at Birth` = Birth_height,
+    `Weight (Kg) at Birth` = Birth_weight
+    )
+```
+
+```{r plot_df_height_weight}
+suppressWarnings(plot_height_weight <- df_height_weight %>% 
+  ggplot2::ggplot(
+    aes(`Height (cm) at Birth`, 
+        `Weight (Kg) at Birth`, 
+        fill = diagnosis, 
+        color = diagnosis
+        )
+    ) + 
+  geom_point(aes(fill = diagnosis, color = diagnosis)) +
+  theme(
+    legend.title = element_blank(),
+    legend.position = "bottom")
+  )
+suppressWarnings(
+  legend <- ggpubr::get_legend(plot_height_weight)
+)
+```
+
+```{r marginal_plot_height_weight}
+suppressWarnings(
+  marginal_plot_height_weight <- ggExtra::ggMarginal(
+    plot_height_weight + theme(legend.position = "none"),
+    groupColour =  TRUE,
+    groupFill = TRUE,
+    type = "density"
+  )
+)
+```
+
+```{r display_marginal_plot_height_weight}
+marginal_plot_height_weight_final <- cowplot::plot_grid(
+marginal_plot_height_weight,
+legend,
+ncol = 1,
+rel_heights = c(1, 0.05)  
+)
+
+marginal_plot_height_weight_final
+```
+
+save box-plot
+```{r save_marginal_plot_height_weight}
+suppressMessages(
+  ggplot2::ggsave(
+    filename = paste0(output_dir, "/birth_height_weight_plot.jpeg"),
+    plot = marginal_plot_height_weight_final,
+    dpi = 300
+  )
+)
+```
+
+pair-wise plots
+```{r pairwise_plot_numric}
+pairwise_plot_numric <- GGally::ggpairs(
+  vitamin_d_case_control_plus_abis, 
+  columns = c("Gestational_age", "Birth_weight", "Birth_height"), 
+  mapping = aes(color = diagnosis), 
+  columnLabels = c("Gestational age (weeks)", 
+                   "Birth weight(Kg)", 
+                   "Birth height(cm)")
+  )
+
+pairwise_plot_numric
+```
+
+save pairwise-plot
+```{r save_pairwise_plot_numric, warning=FALSE}
+suppressWarnings(ggplot2::ggsave(
+  filename = paste0(output_dir, "/numeric_features_pairwiseplot.jpeg"),
+  plot = pairwise_plot_numric,
+  dpi = 300
+))
+```
+
+Box-violin plot
+```{r features2check_numeric_box_plot}
+features2check_numeric_box_plot <- vitamin_d_case_control_plus_abis %>%
+    tidyr::pivot_longer(cols = c(Gestational_age, Birth_weight, Birth_height), 
+                 names_to = "Variable", values_to = "Value") %>%
+    dplyr::mutate(Variable = stringr::str_replace_all(Variable, "_", " ")) %>%
+    ggplot(aes(x = diagnosis, y = Value, fill = diagnosis)) +
+    geom_violin(trim = FALSE, alpha = 0.5) +
+    geom_boxplot(width = 0.1, outlier.shape = NA) +
+    xlab("Group") + 
+    facet_wrap(~ Variable, scales = "free_y") +
+    theme_minimal() +
+    theme(legend.position = "none")
+
+features2check_numeric_box_plot
+```
+
+save box-plot
+```{r save_features2check_numeric_box_plot, warning=FALSE}
+suppressWarnings(ggplot2::ggsave(
+  filename = paste0(output_dir, "/numeric_features_boxplot.jpeg"),
+  plot = features2check_numeric_box_plot,
+  dpi = 300
+))
+```
+
+day of year
+```{r day_of_year}
+vitamin_d_case_control_plus_abis$day_of_year <- lubridate::yday(
+  vitamin_d_case_control_plus_abis$child_dob
+  )
+```
+
+
+Estimate seasonal component to subtract
+```{r estimate_seasonal_component_to_subtract}
+df <- vitamin_d_case_control_plus_abis %>% 
+  dplyr::select(day_of_year, conc_25OHD) %>% 
+  dplyr::arrange(day_of_year) %>% 
+  dplyr::group_by(day_of_year) %>% 
+  dplyr::summarise(
+    max_val=max(conc_25OHD, na.rm = TRUE),
+    min_val=min(conc_25OHD, na.rm = TRUE),
+    mean_val=mean(conc_25OHD, na.rm = TRUE),
+    median_val=median(conc_25OHD, na.rm = TRUE)
+    )
+```
+
+
+```{r seasonal_component_fit_max}
+fit_max <- nls(
+  max_val ~ mu + A * sin(2 * pi * day_of_year / 365.0),
+  data = df,
+  start = list(
+    mu = mean(df$max_val, na.rm = TRUE),
+    A = (max(df$max_val, na.rm = TRUE) - min(df$max_val, na.rm = TRUE)) / 2
+  )
+)
+
+coef(fit_max)
+```
+
+```{r seasonal_component_fit_median}
+fit_median <- nls(
+  median_val ~ mu + A * sin(2 * pi * day_of_year / 365.0),
+  data = df,
+  start = list(
+    mu = median(df$median_val, na.rm = TRUE),
+    A = (max(df$median_val, na.rm = TRUE) - min(df$median_val, na.rm = TRUE)) / 2
+  )
+)
+
+coef(fit_median)
+```
+
+```{r seasonal_component_fit_min}
+fit_min <- nls(
+  min_val ~ mu + A * sin(2 * pi * day_of_year / 365.0),
+  data = df,
+  start = list(
+    mu = mean(df$min_val, na.rm = TRUE),
+    A = (max(df$min_val, na.rm = TRUE) - min(df$min_val, na.rm = TRUE)) / 2
+  )
+)
+
+coef(fit_min)
+```
+
+```{r seasonal_component_fit_mean}
+fit_mean <- nls(
+  mean_val ~ mu + A * sin(2 * pi * day_of_year / 365.0),
+  data = df,
+  start = list(
+    mu = mean(df$mean_val, na.rm = TRUE),
+    A = (max(df$mean_val, na.rm = TRUE) - min(df$mean_val, na.rm = TRUE)) / 2
+  )
+)
+
+coef(fit_mean)
+```
+
+```{r seasonal_component_fit_data}
+df$fit_mean <- predict(fit_mean)
+df$fit_max <- predict(fit_max)
+df$fit_min <- predict(fit_min)
+df$fit_median <- predict(fit_median)
+
+df <- df %>% tidyr::pivot_longer(
+  c("fit_mean", "fit_median", "fit_max", "fit_min"),
+  names_to = "fit_type", values_to = "fit_val"
+)
+```
+
+
+```{r seasonal_component_fit_plot}
+ggplot(df, aes(x = day_of_year)) +
+  geom_point(aes(day_of_year, fit_val, color = fit_type)) +
+  geom_line(aes(day_of_year, fit_val, color = fit_type)) +
+  facet_wrap(~ fit_type, ncol = 1)
+  # geom_point(aes(y = mean_val), color ="blue", shape = 0) +
+  # geom_line(aes(y = fit_mean), color = "blue") +
+  #   geom_point(aes(y = max_val), color ="red", shape = 6) +
+  # geom_line(aes(y = fit_max), color = "red") +
+  #   geom_point(aes(y = min_val), color ="black", shape = 12) +
+  # geom_line(aes(y = fit_min), color = "black") +
+  #   geom_point(aes(y = median_val), color ="green", shape = 18) +
+  # geom_line(aes(y = fit_median), color = "green") +
+  # labs(title = "Sine Fit to mean/ max/ min /median values by Day of Year")
+```
+
+```{r sampling_amplitude_of_seasonal_variation}
+set.seed(123)  # Set the random seed to make results reproducible
+
+A_i <- rnorm(n = nrow(vitamin_d_case_control_plus_abis), mean = 1.34, sd = 1)
+```
+
+<!-- mui = true 25(OH)D of subject i -->
+<!-- mui_ti = mesured 25(OH)D of subject i on calendar day t_i -->
+<!-- Ai = subject-specific amplitude  -->
+
+```{r function_to_get_season_adjusted_25OHD}
+season_adjusted_25OHD <- function(mui_ti,Ai,t_i){
+  return(mui_ti - Ai*sin(2*pi*t_i/365))
+}
+```
+
+```{r add_amplitude_of_variation_to_data_frame}
+vitamin_d_case_control_plus_abis["Ai"] <- A_i
+```
+
+```{r season_adjusted_25OHD}
+vitamin_d_case_control_plus_abis <- vitamin_d_case_control_plus_abis %>%
+  dplyr::rowwise() %>%
+  dplyr::mutate(
+    adjusted_25OHD = season_adjusted_25OHD(conc_25OHD,Ai,day_of_year)
+  ) %>%
+  dplyr::ungroup()
+```
+
+```{r transformed_season_adjusted_25OHD}
+x_25OHD <- vitamin_d_case_control_plus_abis$conc_25OHD
+x_25OHD_log <- log(x_25OHD[x_25OHD>0])
+normal_p_25OHD <- shapiro.test(x_25OHD)$p.value
+lognormal_p_25OHD <- shapiro.test(x_25OHD_log)$p.value
+```
+
+```{r plot_season_adjusted_25OHD}
+suppressWarnings(
+  hist_25OHD <- ggplot(vitamin_d_case_control_plus_abis, aes(x = conc_25OHD)) +
+  geom_histogram(
+    aes(y = ..density..),
+    bins = 100,
+    fill = "lightblue",
+    color = "black",
+    alpha = 0.6
+  ) +
+  # Normal distribution envelope
+  stat_function(
+    fun = dnorm,
+    args = list(
+      mean = mean(vitamin_d_case_control_plus_abis$conc_25OHD, na.rm = TRUE),
+      sd = sd(vitamin_d_case_control_plus_abis$conc_25OHD, na.rm = TRUE)
+    ),
+    color = "blue",
+    size = 1.2,
+    linetype = "dashed",
+    show.legend = TRUE
+  ) +
+  
+  # Log-normal distribution envelope
+  stat_function(
+    fun = dlnorm,
+    args = list(
+      meanlog = mean(log(
+        vitamin_d_case_control_plus_abis$conc_25OHD[vitamin_d_case_control_plus_abis$conc_25OHD > 0]
+      ), na.rm = TRUE),
+      sdlog = sd(log(
+        vitamin_d_case_control_plus_abis$conc_25OHD[vitamin_d_case_control_plus_abis$conc_25OHD > 0]
+      ), na.rm = TRUE)
+    ),
+    color = "red",
+    size = 1.2,
+    linetype = "solid",
+    show.legend = TRUE
+  ) +
+  labs(x = "25(OH)D", y = "Density") +  # No title
+  theme_minimal()
+)
+```
+
+
+
+```{r define_plot_variables}
+x_pos <- Inf
+y_pos <- Inf
+hjust_val <- 1.05
+vjust_val <- 1.5
+```
+
+```{r plot_transformed_data}
+hist_25OHD <- hist_25OHD +
+    annotate(
+        "text",
+        x = x_pos,
+        y = y_pos,
+        hjust = hjust_val,
+        vjust = vjust_val,
+        label = paste0(
+            "Normal P-value = ",
+            formatC(normal_p_25OHD, format = "e", digits = 2)
+        ),
+        color = "blue",
+        size = 4
+    ) +
+    annotate(
+        "text",
+        x = x_pos,
+        y = y_pos,
+        hjust = hjust_val,
+        vjust = vjust_val + 2.50,
+        label = paste0(
+           "Log-normal P-value = ",
+            formatC(lognormal_p_25OHD, format = "e", digits = 2)
+        ),
+        color = "red",
+        size = 4
+    )  
+
+hist_25OHD
+```
+
+```{r save_plot_transformed_data, warning=FALSE}
+suppressWarnings(
+  ggplot2::ggsave(
+    filename = paste0(output_dir,"/distribution_of_25OHD.jpeg"),
+    plot = hist_25OHD,
+    dpi = 300
+  )
+  )
+```
+
+
+<!-- > summary(vitamin_d_case_control_plus_abis$adjusted_25OHD) -->
+<!--    Min. 1st Qu.  Median    Mean 3rd Qu.    Max.  -->
+<!--   4.364  26.143  36.981  40.605  52.009 116.037  -->
+  
+```{r transform_adjusted_data}
+x_adj_25OHD <- vitamin_d_case_control_plus_abis$adjusted_25OHD
+x_adj_25OHD_log <- log(x_adj_25OHD[x_adj_25OHD>0])
+normal_p_adj_25OHD <- shapiro.test(x_adj_25OHD)$p.value
+lognormal_p_adj_25OHD <- shapiro.test(x_adj_25OHD_log)$p.value
+```
+
+```{r plot_transformed_adjusted_data}
+hist_adjusted_25OHD <- ggplot(vitamin_d_case_control_plus_abis, aes(x = adjusted_25OHD)) +
+  geom_histogram(
+    aes(y = ..density..),
+    bins = 100,
+    fill = "lightblue",
+    color = "black",
+    alpha = 0.6
+  ) +
+  # Normal distribution envelope
+  stat_function(
+    fun = dnorm,
+    args = list(
+      mean = mean(vitamin_d_case_control_plus_abis$adjusted_25OHD, na.rm = TRUE),
+      sd = sd(vitamin_d_case_control_plus_abis$adjusted_25OHD, na.rm = TRUE)
+    ),
+    color = "blue",
+    size = 1.2,
+    linetype = "dashed"
+  ) +
+  
+  # Log-normal distribution envelope
+  stat_function(
+    fun = dlnorm,
+    args = list(
+      meanlog = mean(log(
+        vitamin_d_case_control_plus_abis$adjusted_25OHD[vitamin_d_case_control_plus_abis$adjusted_25OHD > 0]
+      ), na.rm = TRUE),
+      sdlog = sd(log(
+        vitamin_d_case_control_plus_abis$adjusted_25OHD[vitamin_d_case_control_plus_abis$adjusted_25OHD > 0]
+      ), na.rm = TRUE)
+    ),
+    color = "red",
+    size = 1.2,
+    linetype = "solid"
+  ) +
+  # Set color labels manually
+  scale_color_manual(
+    name = "Distribution",
+    values = c("Normal" = "blue", "Log-normal" = "red")
+  ) +
+
+  labs(x = "25(OH)D", y = "Density") +  # No title
+  theme_minimal() +
+  theme(
+    legend.position = "right"
+  )
+```
+
+
+```{r plot_histogram_transformed_adjusted_data}
+hist_adjusted_25OHD <- hist_adjusted_25OHD +
+    annotate(
+        "text",
+        x = x_pos,
+        y = y_pos,
+        hjust = hjust_val,
+        vjust = vjust_val,
+        label = paste0(
+            "Normal P-value = ",
+            formatC(normal_p_adj_25OHD, format = "e", digits = 2)
+        ),
+        color = "blue",
+        size = 4
+    ) +
+    annotate(
+        "text",
+        x = x_pos,
+        y = y_pos,
+        hjust = hjust_val,
+        vjust = vjust_val + 2.50,
+        label = paste0(
+           "Log-normal P-value = ",
+            formatC(lognormal_p_adj_25OHD, format = "e", digits = 2)
+        ),
+        color = "red",
+        size = 4
+    )  
+
+hist_adjusted_25OHD
+```
+
+
+```{r save_plot_transformed_adjusted_data, warning=FALSE}
+suppressWarnings(
+  ggplot2::ggsave(
+    filename = paste0(output_dir,"/distribution_of_adjusted_25OHD.jpeg"),
+    plot = hist_adjusted_25OHD,
+    dpi = 300
+  )
+)
+```
+
+
+convert dichotomous variables to 0/1
+```{r cnvert_to_binary}
+vitamin_d_case_control_plus_abis <- vitamin_d_case_control_plus_abis %>%  
+  mutate(across(                                      
+    .cols = all_of(c("diagnosis")),  ## for each column listed and "outcome"
+    .fns = ~case_when(                              
+      . %in% c("T1D")   ~ 1,  
+      . %in% c("control") ~ 0,  
+      TRUE ~ NA_real_)        
+    )
+  ) 
+```
+
+save vitamin_d_case_control_plus_abis for analysis
+```{r}
+write.table(
+  as.data.frame(vitamin_d_case_control_plus_abis),
+  file = paste0(
+    data_root,
+    "/vitamin_d/vitamin_d_case_control_plus_abis.csv"
+  )
+)
+```
+
+
+<!-- model baseline factors ~ diagnosis -->
+<!-- ```{r} -->
+<!-- univariate_models_25OHD <- complete_case_univariate_logistic_regression( -->
+<!--   c(features2check, features2check_numeric), -->
+<!--   vitamin_d_case_control_plus_abis) -->
+<!-- ``` -->
+<!-- ```{r} -->
+<!-- univariate_models_25OHD_flex <- univariate_models_25OHD %>% -->
+<!--   as.data.frame() %>% dplyr::mutate(term = ifelse( -->
+<!--     term %in% c("Season", unlist(all_parameters$category_variable), features2check_numeric), -->
+<!--     gsub("_", " ", gsub( -->
+<!--       "_pregnancy", " (pregnancy)", gsub("_cat", "", gsub( -->
+<!--         "_dichotomous", -->
+<!--         "", -->
+<!--         gsub( -->
+<!--           "Gestational_age", -->
+<!--           "Gestational age (weeks)", -->
+<!--           gsub( -->
+<!--             "Birth_height", -->
+<!--             "Birth height (cm)", -->
+<!--             gsub("Birth_weight", "Birth weight (kg)", term) -->
+<!--           ) -->
+<!--         ) -->
+<!--       )) -->
+<!--     )), -->
+<!--     paste0("\t", term) -->
+<!--   )) %>% -->
+<!--   dplyr::rename( -->
+<!--     Term = term, -->
+<!--     No = no, -->
+<!--     Yes = yes, -->
+<!--     OR = estimate, -->
+<!--     `P-value` = p.value, -->
+<!--     Conf.low = conf.low, -->
+<!--     Conf.high = conf.high -->
+<!--   ) %>% -->
+<!--   dplyr::mutate(  -->
+<!--     Term = if_else(Term == lag(Term) & row_number() > 1, "", Term) -->
+<!--   ) %>% -->
+<!--   flextable::flextable() %>% -->
+<!--   flextable::autofit() %>% -->
+<!--   flextable::color(i = ~ !grepl("\t", Term), ~ Term, color = "blue")  %>% -->
+<!--   flextable::color(i = ~ `P-value` < 0.05, -->
+<!--                    j = c(1, 4, 5), -->
+<!--                    color = "red") -->
+
+<!-- univariate_models_25OHD_flex -->
+<!-- ``` -->
+
+<!-- Fit models: Diagnosis  vitamin D -->
+
+<!-- ```{r vitamin_d_models_summary, message=FALSE, warning=FALSE} -->
+<!-- model_base <- glm(diagnosis ~ conc_25OHD, family = "binomial", data = vitamin_d_case_control_plus_abis) -->
+
+<!-- model_maternal <- glm(diagnosis ~ conc_25OHD + -->
+<!--                         First_degree_T1D_heredity_cat + -->
+<!--                         Smoking_during_pregnancy + -->
+<!--                         Vitamin_mineral_supplement_pregnancy + -->
+<!--                         Fish_any_pregnancy + -->
+<!--                         Parity + -->
+<!--                         Delivery_mode, -->
+<!--                       family = "binomial", data = vitamin_d_case_control_plus_abis) -->
+
+<!-- model_child <- glm(diagnosis ~ conc_25OHD + -->
+<!--                      Preterm_dichotomous + -->
+<!--                      Season + -->
+<!--                      Sex_cat, -->
+<!--                    family = "binomial", data = vitamin_d_case_control_plus_abis) -->
+
+<!-- model_full <- glm(diagnosis ~ conc_25OHD + -->
+<!--                     First_degree_T1D_heredity_cat + -->
+<!--                     Smoking_during_pregnancy + -->
+<!--                     Vitamin_mineral_supplement_pregnancy + -->
+<!--                     Fish_any_pregnancy + -->
+<!--                     Parity + -->
+<!--                     Delivery_mode + -->
+<!--                     Preterm_dichotomous + -->
+<!--                     Season + -->
+<!--                     Sex_cat, -->
+<!--                   family = "binomial", data = vitamin_d_case_control_plus_abis) -->
+<!-- ``` -->
+
+<!-- Fit interaction models -->
+<!-- ```{r vitamin_d_interaction_models_summary, message=FALSE, warning=FALSE} -->
+<!-- model_maternal_interaction <- glm(diagnosis ~ conc_25OHD *( -->
+<!--                         First_degree_T1D_heredity_cat + -->
+<!--                         Smoking_during_pregnancy + -->
+<!--                         Vitamin_mineral_supplement_pregnancy + -->
+<!--                         Fish_any_pregnancy + -->
+<!--                         Parity + -->
+<!--                         Delivery_mode), -->
+<!--                       family = "binomial", data = vitamin_d_case_control_plus_abis) -->
+
+<!-- model_child_interaction <- glm(diagnosis ~ conc_25OHD *( -->
+<!--                      Preterm_dichotomous + -->
+<!--                      Season + -->
+<!--                      Sex_cat), -->
+<!--                    family = "binomial", data = vitamin_d_case_control_plus_abis) -->
+
+<!-- model_full_interaction <- glm(diagnosis ~ conc_25OHD *( -->
+<!--                     First_degree_T1D_heredity_cat + -->
+<!--                     Smoking_during_pregnancy + -->
+<!--                     Vitamin_mineral_supplement_pregnancy + -->
+<!--                     Fish_any_pregnancy + -->
+<!--                     Parity + -->
+<!--                     Delivery_mode + -->
+<!--                     Preterm_dichotomous + -->
+<!--                     Season + -->
+<!--                     Sex_cat), -->
+<!--                   family = "binomial", data = vitamin_d_case_control_plus_abis) -->
+<!-- ``` -->
+
+<!-- ```{r vitamin_d_models_summary_merge, message=FALSE, warning=FALSE} -->
+<!-- # Create model list -->
+<!-- model_list <- list(model_base, model_maternal, model_maternal_interaction, model_child, model_child_interaction, model_full, model_full_interaction) -->
+<!-- model_names <- c("Base (25OHD only)", -->
+<!--                  "Base + Maternal covariates", -->
+<!--                  "Base * Maternal covariates (interaction model)", -->
+<!--                  "Base + Child/Perinatal covariates", -->
+<!--                  "Base * Child/Perinatal covariates (interaction model)", -->
+<!--                  "Full model", -->
+<!--                  "Full model (interaction model)") -->
+
+<!-- # Extract OR, CI, R², and AIC -->
+<!-- suppressMessages(summary_table <- lapply(seq_along(model_list), function(i) { -->
+<!--   model <- model_list[[i]] -->
+<!--   or_info <- tidy(model, conf.int = TRUE, exponentiate = TRUE) %>% -->
+<!--     dplyr::filter(term == "conc_25OHD") %>% -->
+<!--     dplyr::mutate(OR = estimate, CI = paste0("(", round(conf.low, 2), "–", round(conf.high, 2), ")")) %>% -->
+<!--     dplyr::select(OR, CI) -->
+
+<!--   r2_val <- pR2(model)["McFadden"] -->
+<!--   aic_val <- AIC(model) -->
+
+<!--   tibble( -->
+<!--     Model = model_names[i], -->
+<!--     `Odds Ratio (25OHD)` = round(or_info$OR, 2), -->
+<!--     `95% CI (25OHD)` = or_info$CI, -->
+<!--     `Pseudo-R² (McFadden)` = round(r2_val, 2), -->
+<!--     AIC = round(aic_val, 1) -->
+<!--   ) -->
+<!-- }) %>% -->
+<!--   bind_rows()) -->
+<!-- ``` -->
+
+<!-- Summary of Logistic Regression Models for 25(OH)D -->
+
+<!-- ```{r vitamin_d_models_summary_display, message=FALSE, warning=FALSE} -->
+<!-- # kable(summary_table, caption = "Summary of Logistic Regression Models for 25OHD") -->
+<!-- summary_table %>% -->
+<!--   as.data.frame() %>% -->
+<!--   flextable::flextable() %>% -->
+<!--   flextable::autofit()  -->
+<!-- ``` -->
+
+<!-- Prepare data for plotting -->
+<!-- ```{r} -->
+<!-- plot_data <- summary_table %>% -->
+<!--   dplyr::mutate( -->
+<!--     Model = factor(Model, levels = Model), # preserve order -->
+<!--     OR = `Odds Ratio (25OHD)`, -->
+<!--     R2 = `Pseudo-R² (McFadden)`, -->
+<!--     # Extract lower and upper bounds from CI string "(x–y)" -->
+<!--     CI_lower = as.numeric(sub(".*\\((.*)–.*", "\\1", `95% CI (25OHD)`)), -->
+<!--     CI_upper = as.numeric(sub(".*–(.*)\\)", "\\1", `95% CI (25OHD)`)) -->
+<!--   ) -->
+
+<!-- plot_data %>% -->
+<!--   as.data.frame() %>% -->
+<!--   flextable::flextable() %>% -->
+<!--   flextable::autofit()  -->
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- model_plot <- plot_data %>% -->
+<!--   ggplot(aes(y = Model, x = OR, size = R2, label = Model)) + -->
+<!--   geom_point(aes(color = Model, size = R2), alpha = 0.7) + -->
+<!--   geom_pointrange(aes(xmin = CI_lower, xmax = CI_upper, color = Model),alpha = 0.7) + -->
+<!--   geom_vline(xintercept = 1, linetype = "dashed", color = "red") + -->
+<!--   labs( -->
+<!--     x = "Odds Ratio (25OHD)", -->
+<!--     y = "", -->
+<!--     size = "R²" -->
+<!--   )  + -->
+<!--   scale_size_continuous( -->
+<!--     breaks = c(0.02, 0.04, 0.06,0.08, 0.10, 0.140), -->
+<!--     range = c(1, 2.2), -->
+<!--     guide = guide_axis(check.overlap = TRUE) -->
+<!--   ) + -->
+<!--   xlim(c(0.70,1.10)) + -->
+<!--   theme_minimal() + -->
+<!--   theme( -->
+<!--     axis.text.x = element_blank(),    -->
+<!--     axis.text.y = element_text(hjust = 0), -->
+<!--     legend.position = "none" -->
+<!-- ) -->
+
+<!-- model_plot  -->
+<!-- ``` -->
+
+<!-- save plots -->
+<!-- ```{r warning=FALSE} -->
+<!-- suppressWarnings( -->
+<!--   ggsave( -->
+<!--   filename = paste0(output_dir,"/model_OR_25OHD.jpeg"), -->
+<!--   plot = model_plot, -->
+<!--   dpi = 300, -->
+<!--   width = 8.3, -->
+<!--   height = 11.7, -->
+<!--   units = "in" -->
+<!--   ) -->
+<!-- ) -->
+<!-- ``` -->
+
+<!-- group prediction probabilities -->
+<!-- ```{r} -->
+<!-- groups <- names(model_full_interaction$model)[-c(1, 2, 11)] -->
+
+<!-- plot_group_probs <- vector("list", length = length(groups)) -->
+
+<!-- for (iv in seq_along(groups)) { -->
+<!--   v <- groups[[iv]] -->
+
+<!--   pred <- ggpredict(model_full_interaction, -->
+<!--                     terms = c("conc_25OHD [all]", v, "Sex_cat")) -->
+<!--   color_text <- gsub("_", " ", gsub("_cat", "", gsub( -->
+<!--     "_dichotomous", -->
+<!--     "", -->
+<!--     gsub( -->
+<!--       "_during_pregnancy|_any_pregnancy", " (pregnancy)", -->
+<!--            gsub("Vitamin_mineral_supplement_pregnancy", " Vitamin/mineral\n(pregnancy)", -->
+<!--                  gsub("First_degree_T1D_heredity_cat", "T1D heredity",v) -->
+<!--     )) -->
+<!--   ))) -->
+<!--   title_text <- paste0("Interaction: 25(OH)D × ", color_text, " × Sex") -->
+<!--   # Plot manually -->
+<!--   plot_group_probs[[iv]] <- ggplot(pred, aes(x = x, y = predicted, color = group)) + -->
+<!--     geom_line(size = 1) + -->
+<!--     facet_wrap(~ facet) +  # Will use v here -->
+<!--     labs( -->
+<!--       # x = "Centered 25OHD (nmol/L from mean)", -->
+<!--       x = "25(OH)D (nmol/L)", -->
+<!--       y = "Predicted probability of T1D", -->
+<!--       color = color_text -->
+<!--       # title = title_text -->
+<!--     ) + -->
+<!--     xlim(c(0, 100)) + -->
+<!--     theme_minimal() -->
+<!-- } -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- for(iv in seq_along(plot_group_probs)){ -->
+<!--   print(plot_group_probs[[iv]]) -->
+<!-- } -->
+<!-- ``` -->
+
+<!-- save plots -->
+<!-- ```{r warning=FALSE} -->
+<!-- cairo_pdf(paste0(output_dir,"/predicted_prob_full_interaction_model.pdf")) -->
+<!-- for(iv in seq_along(plot_group_probs)){ -->
+<!--   print(plot_group_probs[[iv]]) -->
+<!-- } -->
+<!-- dev.off() -->
+<!-- ``` -->
+
+<!-- DBP: Fit models -->
+<!-- ```{r DBP_models, message=FALSE, warning=FALSE} -->
+<!-- model_dbp_base <- glm(diagnosis ~ DBP, family = "binomial", data = vitamin_d_case_control_plus_abis) -->
+
+<!-- model_dbp_maternal <- glm(diagnosis ~ DBP + -->
+<!--                         First_degree_T1D_heredity_cat + -->
+<!--                         Smoking_during_pregnancy + -->
+<!--                         Vitamin_mineral_supplement_pregnancy + -->
+<!--                         Fish_any_pregnancy + -->
+<!--                         Parity + -->
+<!--                         Delivery_mode, -->
+<!--                       family = "binomial", data = vitamin_d_case_control_plus_abis) -->
+
+<!-- model_dbp_child <- glm(diagnosis ~ DBP + -->
+<!--                      Preterm_dichotomous + -->
+<!--                      Season + -->
+<!--                      Sex_cat, -->
+<!--                    family = "binomial", data = vitamin_d_case_control_plus_abis) -->
+
+<!-- model_dbp_full <- glm(diagnosis ~ DBP + -->
+<!--                     First_degree_T1D_heredity_cat + -->
+<!--                     Smoking_during_pregnancy + -->
+<!--                     Vitamin_mineral_supplement_pregnancy + -->
+<!--                     Fish_any_pregnancy + -->
+<!--                     Parity + -->
+<!--                     Delivery_mode + -->
+<!--                     Preterm_dichotomous + -->
+<!--                     Season + -->
+<!--                     Sex_cat, -->
+<!--                   family = "binomial", data = vitamin_d_case_control_plus_abis) -->
+<!-- ``` -->
+
+<!-- DBP : Interaction models -->
+<!-- ```{r DBP_interaction_models_summary, message=FALSE, warning=FALSE} -->
+<!-- model_dbp_maternal_interaction <- glm(diagnosis ~ DBP *( -->
+<!--                         First_degree_T1D_heredity_cat + -->
+<!--                         Smoking_during_pregnancy + -->
+<!--                         Vitamin_mineral_supplement_pregnancy + -->
+<!--                         Fish_any_pregnancy + -->
+<!--                         Parity + -->
+<!--                         Delivery_mode), -->
+<!--                       family = "binomial", data = vitamin_d_case_control_plus_abis) -->
+
+<!-- model_dbp_child_interaction <- glm(diagnosis ~ DBP *( -->
+<!--                      Preterm_dichotomous + -->
+<!--                      Season + -->
+<!--                      Sex_cat), -->
+<!--                    family = "binomial", data = vitamin_d_case_control_plus_abis) -->
+
+<!-- model_dbp_full_interaction <- glm(diagnosis ~ DBP *( -->
+<!--                     First_degree_T1D_heredity_cat + -->
+<!--                     Smoking_during_pregnancy + -->
+<!--                     Vitamin_mineral_supplement_pregnancy + -->
+<!--                     Fish_any_pregnancy + -->
+<!--                     Parity + -->
+<!--                     Delivery_mode + -->
+<!--                     Preterm_dichotomous + -->
+<!--                     Season + -->
+<!--                     Sex_cat), -->
+<!--                   family = "binomial", data = vitamin_d_case_control_plus_abis) -->
+<!-- ``` -->
+
+<!-- DBP: Create model list -->
+<!-- ```{r DBP_models_summary_merge, message=FALSE, warning=FALSE} -->
+<!-- model_dbp_list <- list(model_dbp_base, model_dbp_maternal, model_dbp_maternal_interaction, model_dbp_child, model_dbp_child_interaction, model_dbp_full, model_dbp_full_interaction) -->
+<!-- model_dbp_names <- c("Base (DBP only)", -->
+<!--                  "Base + Maternal covariates", -->
+<!--                  "Base * Maternal covariates (interaction model)", -->
+<!--                  "Base + Child/Perinatal covariates", -->
+<!--                  "Base * Child/Perinatal covariates (interaction model)", -->
+<!--                  "Full model", -->
+<!--                  "Full model (interaction model)") -->
+
+<!-- # Extract OR, CI, R², and AIC -->
+<!-- suppressWarnings( -->
+<!--   summary_dbp_table <- lapply(seq_along(model_dbp_list), function(i) { -->
+<!--   model <- model_dbp_list[[i]] -->
+<!--   or_info <- tidy(model, conf.int = TRUE, exponentiate = TRUE) %>% -->
+<!--     dplyr::filter(term == "DBP") %>% -->
+<!--     dplyr::mutate( -->
+<!--       OR = estimate, -->
+<!--       CI = paste0("(", round(conf.low, 2), "–", round(conf.high, 2), ")") -->
+<!--     ) %>% -->
+<!--     dplyr::select(OR, CI) -->
+
+<!--   r2_val <- pR2(model)["McFadden"] -->
+<!--   aic_val <- AIC(model) -->
+
+<!--   tibble( -->
+<!--     Model = model_dbp_names[i], -->
+<!--     `Odds Ratio (DBP)` = round(or_info$OR, 2), -->
+<!--     `95% CI (DBP)` = or_info$CI, -->
+<!--     `Pseudo-R² (McFadden)` = round(r2_val, 2), -->
+<!--     AIC = round(aic_val, 1) -->
+<!--   ) -->
+<!-- }) %>% -->
+<!--   bind_rows() -->
+<!-- ) -->
+<!-- ``` -->
+<!-- Summary of Logistic Regression Models for DBP -->
+<!-- ```{r dbp_models_summary_display, message=FALSE, warning=FALSE} -->
+<!-- # kable(summary_dbp_table, caption = "Summary of Logistic Regression Models for DBP") -->
+<!-- summary_dbp_table %>% -->
+<!--   as.data.frame() %>% -->
+<!--   flextable::flextable() %>% -->
+<!--   flextable::autofit()  -->
+<!-- ``` -->
+
+
+<!-- Prepare data for plotting -->
+<!-- ```{r} -->
+<!-- plot_data_dbp <- summary_dbp_table %>% -->
+<!--   dplyr::mutate( -->
+<!--     Model = factor(Model, levels = Model), # preserve order -->
+<!--     OR = `Odds Ratio (DBP)`, -->
+<!--     R2 = `Pseudo-R² (McFadden)`, -->
+<!--     # Extract lower and upper bounds from CI string "(x–y)" -->
+<!--     CI_lower = as.numeric(sub(".*\\((.*)–.*", "\\1", `95% CI (DBP)`)), -->
+<!--     CI_upper = as.numeric(sub(".*–(.*)\\)", "\\1", `95% CI (DBP)`)) -->
+<!--   ) -->
+
+<!-- plot_data_dbp  %>% -->
+<!--   as.data.frame() %>% -->
+<!--   flextable::flextable() %>% -->
+<!--   flextable::autofit()  -->
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- model_dbp_plot <- plot_data_dbp %>% -->
+<!--   ggplot(aes(y = Model, x = OR, size = R2, label = Model)) + -->
+<!--   geom_point(aes(color = Model, size = R2), alpha = 0.7) + -->
+<!--   geom_pointrange( -->
+<!--     aes(xmin = CI_lower, xmax =  ifelse(CI_upper>3,OR+0.15,CI_upper),  -->
+<!--         color = Model),alpha = 0.7) + -->
+<!--   geom_vline(xintercept = 1, linetype = "dashed", color = "red") + -->
+<!--   labs( -->
+<!--     x = "Odds Ratio (DBP)", -->
+<!--     y = "", -->
+<!--     size = "R²" -->
+<!--   )  + -->
+<!--   scale_size_continuous( -->
+<!--     breaks = c(0.02, 0.04, 0.06,0.08, 0.10, 0.120), -->
+<!--     range = c(1, 2.2) #, -->
+<!--     # guide = guide_axis(check.overlap = TRUE) -->
+<!--   ) + -->
+<!--   theme_minimal() + -->
+<!--   theme( -->
+<!--     axis.text.x = element_blank(),    -->
+<!--     axis.text.y = element_text(hjust = 0), -->
+<!--     legend.position = "none" -->
+<!-- ) -->
+
+<!-- model_dbp_plot  -->
+<!-- ``` -->
+
+
+<!-- save plots -->
+<!-- ```{r} -->
+<!-- ggsave( -->
+<!--   filename = paste0(output_dir,"/model_OR_DBP.jpeg"), -->
+<!--   plot = model_dbp_plot, -->
+<!--   dpi = 300, -->
+<!--   width = 8.3, -->
+<!--   height = 11.7, -->
+<!--   units = "in" -->
+<!--   ) -->
+<!-- ``` -->
+
+
+<!-- group prediction probabilities DBP -->
+<!-- ```{r} -->
+<!-- groups <- names(model_dbp_full_interaction$model)[-c(1, 2, 11)] -->
+<!-- print(groups) -->
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- plot_group_probs_dbp <- vector("list", length = length(groups)) -->
+
+<!-- for (iv in seq_along(groups)) { -->
+<!--   v <- groups[[iv]] -->
+
+<!--   pred_dbp <- ggpredict(model_dbp_full_interaction, -->
+<!--                     terms = c("DBP [all]", v, "Sex_cat")) -->
+<!--   color_text <- gsub("_", " ", gsub("_cat", "", gsub( -->
+<!--     "_dichotomous", -->
+<!--     "", -->
+<!--     gsub( -->
+<!--       "_during_pregnancy|_any_pregnancy", " (pregnancy)", -->
+<!--            gsub("Vitamin_mineral_supplement_pregnancy", " Vitamin/mineral\n(pregnancy)", -->
+<!--                  gsub("First_degree_T1D_heredity_cat", "T1D heredity",v) -->
+<!--     )) -->
+<!--   ))) -->
+<!--   title_text <- paste0("Interaction: DBP × ", color_text, " × Sex") -->
+<!--   # Plot manually -->
+<!--   plot_group_probs_dbp[[iv]] <- ggplot(pred_dbp, aes(x = x, y = predicted, color = group)) + -->
+<!--     geom_line(size = 1) + -->
+<!--     facet_wrap(~ facet) +  # Will use v here -->
+<!--     labs( -->
+<!--       x = "DBP (\u03bcmol/L)", -->
+<!--       y = "Predicted probability of T1D", -->
+<!--       color = color_text -->
+<!--       # title = title_text -->
+<!--     ) + -->
+<!--     xlim(c(0, 10)) + -->
+<!--     theme_minimal() -->
+<!-- } -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- for(iv in seq_along(plot_group_probs_dbp)){ -->
+<!--   print(plot_group_probs_dbp[[iv]]) -->
+<!-- } -->
+<!-- ``` -->
+
+<!-- save plots -->
+<!-- ```{r} -->
+<!-- cairo_pdf(paste0(output_dir,"/predicted_prob_full_interaction_model_DBP.pdf")) -->
+<!-- for(iv in seq_along(plot_group_probs_dbp)){ -->
+<!--   print(plot_group_probs_dbp[[iv]]) -->
+<!-- } -->
+<!-- dev.off() -->
+<!-- ``` -->
+
+
+
+<!-- glm diagnosis ~ conc_25OHD -->
+<!-- ```{r} -->
+<!-- fit_25OHD_no_covariate <- glm( -->
+<!--     formula = diagnosis ~ conc_25OHD, -->
+<!--     data = vitamin_d_case_control_plus_abis, -->
+<!--     family = binomial -->
+<!-- ) -->
+
+<!-- results_25OHD_diagnosis_no_covariate <- fit_25OHD_no_covariate %>% -->
+<!--   broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>% -->
+<!--   dplyr::mutate_if(is.numeric, function(x) -->
+<!--     ifelse(x < 0.001, formatC(x, format = "e", 3), round(x, 3))) %>% -->
+<!--   dplyr::filter(term != "(Intercept)")  %>% -->
+<!--   dplyr::select(-c("std.error", "statistic")) %>% -->
+<!--   dplyr::rename( -->
+<!--     Term = term, -->
+<!--     OR = estimate, -->
+<!--     `P-value` = p.value, -->
+<!--     Conf.low = conf.low, -->
+<!--     Conf.high =conf.high -->
+<!--     ) -->
+
+
+<!-- results_25OHD_diagnosis_no_covariate  %>% -->
+<!--   as.data.frame() %>% -->
+<!--   flextable::flextable() %>% -->
+<!--   flextable::autofit()  -->
+<!-- ``` -->
+
+<!-- conditional regression - case-control matching   -->
+
+
+<!-- Assessing Balance: A. Check Initial Imbalance -->
+
+<!-- ```{r} -->
+<!-- child_covariates <- c("Preterm_dichotomous","Birth_weight", "Season", "Sex_cat") -->
+
+<!-- maternal_covariates <- c( -->
+<!--   "First_degree_T1D_heredity_cat", -->
+<!--   "Smoking_during_pregnancy", -->
+<!--   # "Vitamin_mineral_supplement_pregnancy", -->
+<!--   "Fish_any_pregnancy", -->
+<!--   "Parity", -->
+<!--   "Delivery_mode" -->
+<!-- ) -->
+<!-- ``` -->
+
+
+<!-- all covariates -->
+<!-- ```{r} -->
+<!-- df_all <- vitamin_d_case_control_plus_abis %>% -->
+<!--   dplyr::select( -->
+<!--     all_of(c("ABISnr", "diagnosis", "conc_25OHD", child_covariates, maternal_covariates))) %>% -->
+<!--   tidyr::drop_na() -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- all_covariates_formula <- paste0(c(child_covariates, maternal_covariates),collapse = " + ") -->
+<!-- all_covariates_formula  -->
+<!-- ``` -->
+
+
+<!-- ```{r echo=FALSE} -->
+<!-- w_25OHD_all <- weightit( -->
+<!--   as.formula(paste0("conc_25OHD ~  ", all_covariates_formula)), -->
+<!--   data = df_all, -->
+<!--   method = "ebal" -->
+<!-- ) -->
+<!-- ``` -->
+
+
+<!-- ```{r echo=FALSE} -->
+<!-- suppressMessages( -->
+<!--   fit_25OHD_all <- glm_weightit( -->
+<!--   as.formula(paste0("diagnosis ~ conc_25OHD * (",all_covariates_formula,")")), -->
+<!--   data = df_all, -->
+<!--   weightit = w_25OHD_all, -->
+<!--   family = binomial -->
+<!-- ) -->
+<!-- ) -->
+<!-- ``` -->
+
+
+<!-- ```{r echo=FALSE} -->
+<!-- avg_25OHD_all <- avg_comparisons( -->
+<!--   fit_25OHD_all, -->
+<!--   type = "link", -->
+<!--   comparison = "lnor", -->
+<!--   transform = "exp" -->
+<!-- ) %>% -->
+<!--   broom::tidy() %>% -->
+<!--   as.data.frame() %>% -->
+<!--   dplyr::mutate( -->
+<!--     term = ifelse(row_number()> 1 & term == lag(term), -->
+<!--                     NA_character_, -->
+<!--                     gsub("_"," ",gsub("_cat","",gsub("_dichotomous","",gsub("Birth_weight_cat","Birth weight category",term)))) -->
+<!--                     ) -->
+<!--     ) %>% -->
+<!--   dplyr::mutate_if(is.numeric, function(x) ifelse(x<0.001, formatC(x, format = "e", 3), round(x,3))) %>% -->
+<!--   dplyr::rename( -->
+<!--     Term = term, -->
+<!--     Contrast = contrast, -->
+<!--     OR = estimate, -->
+<!--     `P-value` = p.value -->
+<!--     ) %>% -->
+<!--   dplyr::mutate( -->
+<!--         `OR (95% CI)` = paste0(as.character(OR)," (",as.character(conf.low),"-",as.character(conf.high),")") -->
+<!--   ) %>% -->
+<!--   dplyr::select(all_of(c("Term", "Contrast","OR (95% CI)", "P-value")))  -->
+
+
+<!-- first_row <- avg_25OHD_all %>% dplyr::filter(Term == "conc 25OHD") -->
+
+<!-- other_rows <- avg_25OHD_all %>% dplyr::filter(Term != "conc 25OHD" | is.na(Term)) -->
+
+<!-- avg_25OHD_all <- rbind(first_row, other_rows) -->
+<!-- ``` -->
+
+<!-- Diagnosis ~ conc. 25(OH)D * (all covariates) : weighted data -->
+<!-- ```{r echo=FALSE} -->
+<!-- # kable(avg_25OHD_all, caption = "Diagnosis ~ conc. 25(OH)D * (all covariates) : weighted data") -->
+<!-- avg_25OHD_all %>% -->
+<!--   as.data.frame() %>% -->
+<!--   flextable::flextable() %>% -->
+<!--   flextable::autofit()  -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- birth_weight_quantiles_all <- quantile(df_all$Birth_weight) -->
+
+<!-- df_all$Birth_weight_cat <- cut( -->
+<!--   df_all$Birth_weight, -->
+<!--   breaks = c( -->
+<!--     birth_weight_quantiles_all[[1]], -->
+<!--     birth_weight_quantiles_all[[2]], -->
+<!--     birth_weight_quantiles_all[[3]], -->
+<!--     birth_weight_quantiles_all[[4]], -->
+<!--     Inf -->
+<!--   ), -->
+<!--   labels = c("q1", "q2", "q3", "q4"), -->
+<!--   include.lowest = TRUE -->
+<!-- ) -->
+
+<!-- df_all_all_cat <- df_all %>% -->
+<!--   dplyr::select(-Birth_weight) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- all_covariates_cat_formula <- paste0(names(df_all_all_cat)[-c(1:3)],collapse = " + ") -->
+<!-- all_covariates_cat_formula -->
+<!-- ``` -->
+
+
+<!-- ```{r echo=FALSE} -->
+<!-- w_25OHD_all_cat <- weightit( -->
+<!--   as.formula(paste0("conc_25OHD ~  ", all_covariates_cat_formula)), -->
+<!--   data = df_all_all_cat, -->
+<!--   method = "ebal" -->
+<!-- ) -->
+
+<!-- fit_25OHD_all_cat <- glm_weightit( -->
+<!--   as.formula(paste0("diagnosis ~ conc_25OHD * (",all_covariates_cat_formula,")")), -->
+<!--   data = df_all_all_cat, -->
+<!--   weightit = w_25OHD_all_cat, -->
+<!--   family = binomial -->
+<!-- ) -->
+
+<!-- avg_25OHD_all_cat <- avg_comparisons( -->
+<!--   fit_25OHD_all_cat, -->
+<!--   type = "link", -->
+<!--   comparison = "lnor", -->
+<!--   transform = "exp" -->
+<!-- ) %>% -->
+<!--   broom::tidy() %>% -->
+<!--   as.data.frame() %>% -->
+<!--   dplyr::mutate( -->
+<!--     term = ifelse(row_number()> 1 & term == lag(term), -->
+<!--                     NA_character_, -->
+<!--                     gsub("_"," ",gsub("_cat","",gsub("_dichotomous","",gsub("Birth_weight_cat","Birth weight category",term)))) -->
+<!--                     ) -->
+<!--     ) %>% -->
+<!--   dplyr::mutate_if(is.numeric, function(x) ifelse(x<0.001, formatC(x, format = "e", 3), round(x,3))) %>% -->
+<!--   dplyr::rename( -->
+<!--     Term = term, -->
+<!--     Contrast = contrast, -->
+<!--     OR = estimate, -->
+<!--     `P-value` = p.value -->
+<!--     ) %>% -->
+<!--   dplyr::mutate( -->
+<!--         `OR (95% CI)` = paste0(as.character(OR)," (",as.character(conf.low),"-",as.character(conf.high),")") -->
+<!--   ) %>% -->
+<!--   dplyr::select(all_of(c("Term", "Contrast","OR (95% CI)", "P-value")))  -->
+
+<!-- first_row <- avg_25OHD_all_cat %>% dplyr::filter(Term == "conc 25OHD") -->
+<!-- other_rows <- avg_25OHD_all_cat %>% dplyr::filter(Term != "conc 25OHD" | is.na(Term)) -->
+<!-- avg_25OHD_all_cat <- rbind(first_row, other_rows) -->
+<!-- ``` -->
+
+<!-- Diagnosis ~ conc. 25(OH)D * (all categorical covariates) : weighted data -->
+<!-- ```{r echo=FALSE} -->
+<!-- # kable(avg_25OHD_all_cat, caption = "Diagnosis ~ conc. 25(OH)D * (all categorical covariates) : weighted data") -->
+<!-- avg_25OHD_all_cat %>% -->
+<!--   as.data.frame() %>% -->
+<!--   flextable::flextable() %>% -->
+<!--   flextable::autofit() %>% -->
+<!--   flextable::color( -->
+<!--     i = ~ `P-value` < 0.05, -->
+<!--     j = c("Contrast", "P-value"), -->
+<!--     color = "red") -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- df_child <- vitamin_d_case_control_plus_abis %>% -->
+<!--   dplyr::select(ABISnr, diagnosis,conc_25OHD,Preterm_dichotomous,Birth_weight,Season,Sex_cat) %>% -->
+<!--   tidyr::drop_na() -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- fit_25OHD_child_no_match_no_interaction <- glm_weightit( -->
+<!--     diagnosis ~ conc_25OHD,  -->
+<!--     data = df_child, -->
+<!--     family = binomial -->
+<!--   ) -->
+
+<!-- avg_25OHD_child_no_match_no_interaction <- avg_comparisons( -->
+<!--   fit_25OHD_child_no_match_no_interaction, -->
+<!--   type = "link", -->
+<!--   comparison = "lnor", -->
+<!--   transform = "exp" -->
+<!-- ) %>% -->
+<!--   broom::tidy() %>% -->
+<!--   dplyr::select(term, estimate, p.value, conf.low, conf.high) %>% -->
+<!--   dplyr::mutate(term = ifelse( -->
+<!--     row_number() > 1 & term == lag(term), -->
+<!--     NA_character_, -->
+<!--     gsub("_", " ", gsub( -->
+<!--       "_cat", "", gsub( -->
+<!--         "_dichotomous", -->
+<!--         "", gsub("Birth_weight_cat", "Birth weight category", term))))) -->
+<!--     ) %>% -->
+<!--   dplyr::mutate_if(is.numeric, function(x) -->
+<!--     ifelse(x < 0.001, formatC(x, format = "e", 3), round(x, 3))) %>% -->
+<!--   dplyr::rename( -->
+<!--     Term = term, -->
+<!--     OR = estimate, -->
+<!--     `P-value` = p.value -->
+<!--   ) %>% -->
+<!--   dplyr::mutate( -->
+<!--         `OR (95% CI)` = paste0(as.character(OR)," (",as.character(conf.low),"-",as.character(conf.high),")") -->
+<!--   ) %>% -->
+<!--   dplyr::select(-all_of(c("OR","conf.low", "conf.high"))) %>% -->
+<!--   dplyr::select(all_of(c("Term","OR (95% CI)", "P-value"))) -->
+<!-- ``` -->
+
+<!-- Diagnosis ~ conc. 25(OH)D * (child covariates) : not weighted nointeraction -->
+<!-- ```{r} -->
+<!-- # kable( -->
+<!-- #   avg_25OHD_child_no_match_no_interaction,  -->
+<!-- #   caption = "Diagnosis ~ conc. 25(OH)D * (child covariates) : not weighted nointeraction") -->
+
+<!-- avg_25OHD_child_no_match_no_interaction %>% -->
+<!--   as.data.frame() %>% -->
+<!--   flextable::flextable() %>% -->
+<!--   flextable::autofit() -->
+<!-- ``` -->
+
+<!-- glm diagnosis ~ conc_25OHD; case-control matched by child (birth) covariates -->
+<!-- ```{r} -->
+<!-- w_25OHD_child <- weightit( -->
+<!--     conc_25OHD ~ Preterm_dichotomous + Season + Sex_cat + Birth_weight, -->
+<!--     data = df_child, -->
+<!--     method = "ebal" -->
+<!--   ) -->
+
+<!-- fit_25OHD_child_cov_matched_no_interaction <- glm_weightit( -->
+<!--     diagnosis ~ conc_25OHD,  -->
+<!--     data = df_child, -->
+<!--     weightit = w_25OHD_child, -->
+<!--     family = binomial -->
+<!--   ) -->
+
+<!-- avg_25OHD_child_cov_matched_no_interaction <- avg_comparisons( -->
+<!--   fit_25OHD_child_cov_matched_no_interaction, -->
+<!--   type = "link", -->
+<!--   comparison = "lnor", -->
+<!--   transform = "exp" -->
+<!-- ) %>% -->
+<!--   broom::tidy() %>% -->
+<!--   dplyr::select(term, estimate, p.value, conf.low, conf.high) %>% -->
+<!--   dplyr::mutate(term = ifelse( -->
+<!--     row_number() > 1 & term == lag(term), -->
+<!--     NA_character_, -->
+<!--     gsub("_", " ", gsub( -->
+<!--       "_cat", "", gsub( -->
+<!--         "_dichotomous", -->
+<!--         "", gsub("Birth_weight_cat", "Birth weight category", term))))) -->
+<!--     ) %>%   -->
+<!--   dplyr::mutate_if(is.numeric, function(x) -->
+<!--     ifelse(x < 0.001, formatC(x, format = "e", 3), round(x, 3))) %>% -->
+<!--   dplyr::rename( -->
+<!--     Term = term, -->
+<!--     OR = estimate, -->
+<!--     `P-value` = p.value -->
+<!--   ) %>% -->
+<!--   dplyr::mutate( -->
+<!--         `OR (95% CI)` = paste0(as.character(OR)," (",as.character(conf.low),"-",as.character(conf.high),")") -->
+<!--   ) %>% -->
+<!--   dplyr::select(-all_of(c("OR","conf.low", "conf.high"))) %>% -->
+<!--   dplyr::select(all_of(c("Term","OR (95% CI)", "P-value"))) -->
+<!-- ``` -->
+
+<!-- Diagnosis ~ conc. 25(OH)D * (child covariates) : weighted but no interaction -->
+<!-- ```{r} -->
+<!-- # kable( -->
+<!-- #   avg_25OHD_child_cov_matched_no_interaction,  -->
+<!-- #   caption = "Diagnosis ~ conc. 25(OH)D * (child covariates) : weighted but no interaction") -->
+
+<!-- avg_25OHD_child_cov_matched_no_interaction %>% -->
+<!--   as.data.frame() %>% -->
+<!--   flextable::flextable() %>% -->
+<!--   flextable::autofit() -->
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- fit_25OHD_child_cov_matched_and_with_interaction <- glm_weightit( -->
+<!--     diagnosis ~ conc_25OHD*(Preterm_dichotomous + Season + Sex_cat + Birth_weight), -->
+<!--     data = df_child, -->
+<!--     weightit = w_25OHD_child, -->
+<!--     family = binomial -->
+<!--   ) -->
+
+<!-- avg_25OHD_child_cov_matched_and_with_interaction <- avg_comparisons( -->
+<!--   fit_25OHD_child_cov_matched_and_with_interaction, -->
+<!--   type = "link", -->
+<!--   comparison = "lnor", -->
+<!--   transform = "exp" -->
+<!-- ) %>% -->
+<!--   broom::tidy() %>% -->
+<!--   dplyr::select(term, contrast, estimate, p.value, conf.low, conf.high) %>% -->
+<!--   dplyr::mutate(term = ifelse( -->
+<!--     row_number() > 1 & term == lag(term), -->
+<!--     NA_character_, -->
+<!--     gsub("_", " ", gsub( -->
+<!--       "_cat", "", gsub( -->
+<!--         "_dichotomous", -->
+<!--         "", gsub("Birth_weight_cat", "Birth weight category", term))))) -->
+<!--     ) %>%   -->
+<!--   dplyr::mutate_if(is.numeric, function(x) -->
+<!--     ifelse(x < 0.001, formatC(x, format = "e", 3), round(x, 3))) %>% -->
+<!--   dplyr::rename( -->
+<!--     Term = term, -->
+<!--     Contrast = contrast, -->
+<!--     OR = estimate, -->
+<!--     `P-value` = p.value -->
+<!--   ) %>% -->
+<!--   dplyr::mutate( -->
+<!--         `OR (95% CI)` = paste0(as.character(OR)," (",as.character(conf.low),"-",as.character(conf.high),")") -->
+<!--   ) %>% -->
+<!--   dplyr::select(-all_of(c("OR","conf.low", "conf.high"))) %>% -->
+<!--   dplyr::select(all_of(c("Term", "Contrast","OR (95% CI)", "P-value"))) %>% -->
+<!--   dplyr::mutate( -->
+<!--     Term = ifelse( -->
+<!--       row_number() > 1 & lag(Term) == Term, -->
+<!--       NA_character_, -->
+<!--       gsub("_"," ",gsub("_cat","",gsub("_dichotomous","",Term)))) -->
+<!--     ) -->
+
+<!-- first_row <- avg_25OHD_child_cov_matched_and_with_interaction %>%  -->
+<!--   dplyr::filter(Term == "conc 25OHD") -->
+<!-- other_rows <- avg_25OHD_child_cov_matched_and_with_interaction %>%  -->
+<!--   dplyr::filter(Term != "conc 25OHD" | is.na(Term)) -->
+<!-- avg_25OHD_child_cov_matched_and_with_interaction <- rbind(first_row, other_rows) -->
+<!-- ``` -->
+
+<!-- Diagnosis ~ conc. 25(OH)D * (child covariates) : weighted and with interaction -->
+<!-- ```{r} -->
+<!-- # kable( -->
+<!-- #   avg_25OHD_child_cov_matched_and_with_interaction,  -->
+<!-- #   caption = "Diagnosis ~ conc. 25(OH)D * (child covariates) : weighted and with interaction") -->
+
+<!-- avg_25OHD_child_cov_matched_and_with_interaction %>% -->
+<!--   as.data.frame() %>% -->
+<!--   flextable::flextable() %>% -->
+<!--   flextable::autofit() %>% -->
+<!--   flextable::color( -->
+<!--     i = ~ `P-value` < 0.05, -->
+<!--     j = c("Contrast", "P-value"), -->
+<!--     color = "red") -->
+<!-- ``` -->
+
+
+
+<!-- ```{r} -->
+<!-- birth_weight_quantiles <- quantile(df_child$Birth_weight) -->
+
+<!-- df_child$Birth_weight_cat <- cut( -->
+<!--   df_child$Birth_weight, -->
+<!--   breaks = c(birth_weight_quantiles[[1]],birth_weight_quantiles[[2]],birth_weight_quantiles[[3]],birth_weight_quantiles[[4]], Inf), -->
+<!--   labels = c("q1", "q2", "q3", "q4"), -->
+<!--   include.lowest = TRUE -->
+<!-- ) -->
+
+<!-- df_child_all_cat <- df_child %>% -->
+<!--   dplyr::select(-Birth_weight) -->
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- results_list_child <- lapply(c("Season", "Sex_cat","Birth_weight_cat", "Preterm_dichotomous"), function(stratum) { -->
+<!--   w <- weightit( -->
+<!--     conc_25OHD ~ Preterm_dichotomous + Season + Sex_cat + Birth_weight_cat, -->
+<!--     data = df_child, -->
+<!--     by = as.formula(paste0("~", stratum)), -->
+<!--     method = "ebal" -->
+<!--   ) -->
+<!--   fit <- glm_weightit( -->
+<!--     diagnosis ~ conc_25OHD*(Preterm_dichotomous + Season + Sex_cat + Birth_weight_cat), -->
+<!--     data = df_child, -->
+<!--     weightit = w, -->
+<!--     family = binomial -->
+<!--   ) -->
+<!--   avg <- avg_comparisons( -->
+<!--     fit, -->
+<!--     variables = "conc_25OHD", -->
+<!--     by = stratum, -->
+<!--     type = "link", -->
+<!--     comparison = "lnor", -->
+<!--     transform = "exp" -->
+<!--   ) %>% -->
+<!--     broom::tidy() %>% -->
+<!--     dplyr::rename(level = !!stratum) %>%          -->
+<!--     dplyr::mutate(strata = stratum) %>%           -->
+<!--     dplyr::select(strata, level, estimate, p.value, conf.low, conf.high)     -->
+<!--   return(list(avg,w)) -->
+<!-- }) -->
+<!-- names(results_list_child) <- c("Season", "Sex_cat", "Birth_weight_cat", "Preterm_dichotomous") -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- cowplot::plot_grid( -->
+<!--     love.plot(results_list_child[[1]][[2]], title = ""), -->
+<!--     love.plot(results_list_child[[2]][[2]], title = ""), -->
+<!--     love.plot(results_list_child[[3]][[2]], title = ""), -->
+<!--     love.plot(results_list_child[[4]][[2]], title = ""), -->
+<!--     labels = c("A. Season",  -->
+<!--                "B. Sex",  -->
+<!--                "C. Birth weight category", -->
+<!--                "D. Preterm-birth"), -->
+<!--     nrow = 2, -->
+<!--     ncol = 2 -->
+<!--     ) -->
+<!-- ``` -->
+
+<!-- save stratum stratified weight matched  -->
+<!-- ```{r} -->
+<!-- ggsave( -->
+<!--   filename = paste0(output_dir, "/conc_25OHD_child_covariate_correlations_entropy_balanced.jpeg"), -->
+<!--   plot = cowplot::plot_grid( -->
+<!--     love.plot(results_list_child[[1]][[2]], title = ""), -->
+<!--     love.plot(results_list_child[[2]][[2]], title = ""), -->
+<!--     love.plot(results_list_child[[3]][[2]], title = ""), -->
+<!--     love.plot(results_list_child[[4]][[2]], title = ""), -->
+<!--     labels = c("A. Season",  -->
+<!--                "B. Sex",  -->
+<!--                "C. Birth weight category", -->
+<!--                "D. Preterm-birth") -->
+<!--     ), -->
+<!--   dpi = 300, -->
+<!--   units = "in", -->
+<!--   width = 10.3, -->
+<!--   height = 14.7 -->
+<!-- ) -->
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- for(ii in seq_along(names(results_list_child))) { -->
+<!--   if (ii == 1) { -->
+<!--     child_25OHD_diagnosis_results <- results_list_child[[ii]][[1]] -->
+<!--   } else { -->
+<!--     child_25OHD_diagnosis_results <- rbind(child_25OHD_diagnosis_results, results_list_child[[ii]][[1]]) -->
+<!--   } -->
+<!-- } -->
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- child_25OHD_diagnosis_results <- child_25OHD_diagnosis_results %>% -->
+<!--   dplyr::mutate( -->
+<!--     strata = ifelse(row_number()> 1 & strata == lag(strata), -->
+<!--                     NA_character_, -->
+<!--                     gsub("_"," ",gsub("_cat","",gsub("_dichotomous","",gsub("Birth_weight_cat","Birth weight category",strata)))) -->
+<!--                     ) -->
+<!--     ) %>% -->
+<!--   dplyr::mutate_if(is.numeric, function(x) ifelse(x<0.001, formatC(x, format = "e", 3), round(x,3))) %>% -->
+<!--   dplyr::rename( -->
+<!--     Strata = strata, -->
+<!--     Level = level, -->
+<!--     OR = estimate, -->
+<!--     `P-value` = p.value -->
+<!--     ) %>% -->
+<!--   dplyr::mutate( -->
+<!--         `OR (95% CI)` = paste0(as.character(OR)," (",as.character(conf.low),"-",as.character(conf.high),")") -->
+<!--   ) %>% -->
+<!--   dplyr::select(-all_of(c("OR","conf.low", "conf.high"))) %>% -->
+<!--   dplyr::select(all_of(c("Strata", "Level","OR (95% CI)", "P-value")))  -->
+
+<!-- child_25OHD_diagnosis_results %>% -->
+<!--   as.data.frame() %>% -->
+<!--   flextable::flextable() %>% -->
+<!--   flextable::autofit() %>% -->
+<!--   flextable::color( -->
+<!--     i = ~ `P-value` < 0.05, -->
+<!--     j = c("Level", "P-value"), -->
+<!--     color = "red") -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- maternal_covariates <- c( -->
+<!--   "First_degree_T1D_heredity_cat", -->
+<!--   "Smoking_during_pregnancy", -->
+<!--   # "Vitamin_mineral_supplement_pregnancy", -->
+<!--   "Fish_any_pregnancy", -->
+<!--   "Parity", -->
+<!--   "Delivery_mode" -->
+<!-- ) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- df_maternal <- vitamin_d_case_control_plus_abis %>% -->
+<!--   dplyr::select( -->
+<!--     all_of(c("ABISnr", "diagnosis", "conc_25OHD", maternal_covariates))) %>% -->
+<!--   tidyr::drop_na() -->
+<!-- ``` -->
+
+<!-- no stratification -->
+<!-- ```{r echo=FALSE} -->
+<!-- w_25OHD_maternal <- weightit( -->
+<!--   conc_25OHD ~  First_degree_T1D_heredity_cat + Smoking_during_pregnancy + Fish_any_pregnancy + Parity + Delivery_mode, -->
+<!--   data = df_maternal, -->
+<!--   method = "ebal" -->
+<!-- ) -->
+
+
+<!-- fit_25OHD_maternal <- glm_weightit( -->
+<!--   diagnosis ~ conc_25OHD * ( -->
+<!--     First_degree_T1D_heredity_cat + Smoking_during_pregnancy + Fish_any_pregnancy + Parity + Delivery_mode -->
+<!--   ), -->
+<!--   data = df_maternal, -->
+<!--   weightit = w_25OHD_maternal, -->
+<!--   family = binomial -->
+<!-- )   -->
+
+<!-- avg_25OHD_maternal <- avg_comparisons( -->
+<!--   fit_25OHD_maternal, -->
+<!--   type = "link", -->
+<!--   comparison = "lnor", -->
+<!--   transform = "exp" -->
+<!-- ) %>% -->
+<!--   broom::tidy() %>% -->
+<!--   as.data.frame() %>% -->
+<!--   dplyr::mutate(term = ifelse( -->
+<!--     row_number() > 1 & term == lag(term), -->
+<!--     NA_character_, -->
+<!--     gsub("_", " ", gsub( -->
+<!--       "_cat", "", gsub( -->
+<!--         "_dichotomous", -->
+<!--         "", -->
+<!--         gsub("Birth_weight_cat", "Birth weight category", term) -->
+<!--       ) -->
+<!--     )) -->
+<!--   )) %>%  -->
+<!--   dplyr::mutate_if(is.numeric, function(x) ifelse(x<0.001, formatC(x, format = "e", 3), round(x,3))) %>% -->
+<!--   dplyr::rename( -->
+<!--     Term = term, -->
+<!--     Contrast = contrast, -->
+<!--     OR = estimate, -->
+<!--     `P-value` = p.value -->
+<!--     ) %>% -->
+<!--   dplyr::mutate( -->
+<!--         `OR (95% CI)` = paste0(as.character(OR)," (",as.character(conf.low),"-",as.character(conf.high),")") -->
+<!--   ) %>% -->
+<!--   dplyr::select(all_of(c("Term", "Contrast","OR (95% CI)", "P-value")))  -->
+
+<!-- avg_25OHD_maternal %>% -->
+<!--   as.data.frame() %>% -->
+<!--   flextable::flextable() %>% -->
+<!--   flextable::autofit() %>% -->
+<!--   flextable::color( -->
+<!--     i = ~ `P-value` < 0.05, -->
+<!--     j = c("Contrast", "P-value"), -->
+<!--     color = "red") -->
+<!-- ``` -->
+
+<!-- diagnosis ~ conc_25OHD with stratified maternal covariates -->
+<!-- ```{r warning=FALSE} -->
+<!-- results_list_maternal <- lapply(maternal_covariates[c(2:3)], function(stratum) { -->
+
+<!--     curr_strata <- gsub("_", " ", gsub( -->
+<!--     "_during_pregnancy", -->
+<!--     " (pregnancy) ", -->
+<!--     gsub("_any_pregnancy", " any (pregnancy) ", stratum) -->
+<!--     )) -->
+
+<!--     w <- weightit( -->
+<!--     conc_25OHD ~ First_degree_T1D_heredity_cat + Smoking_during_pregnancy +  -->
+<!--     Fish_any_pregnancy + Parity + Delivery_mode, -->
+<!--     data = df_maternal, -->
+<!--     by = as.formula(paste0("~", stratum)), -->
+<!--     method = "ebal" -->
+<!--     ) -->
+
+<!--     fit <- glm_weightit( -->
+<!--     diagnosis ~ conc_25OHD*(First_degree_T1D_heredity_cat + Smoking_during_pregnancy +  -->
+<!--     Fish_any_pregnancy + Parity + Delivery_mode), -->
+<!--     data = df_maternal, -->
+<!--     weightit = w, -->
+<!--     family = binomial -->
+<!--     ) -->
+
+<!--     avg <- avg_comparisons( -->
+<!--     fit, -->
+<!--     variables = "conc_25OHD", -->
+<!--     by = stratum, -->
+<!--     type = "link", -->
+<!--     comparison = "lnor", -->
+<!--     transform = "exp" -->
+<!--     ) %>% -->
+<!--     broom::tidy() %>% -->
+<!--     dplyr::mutate_if(is.numeric, function(x) ifelse(x<0.001, formatC(x, format = "e", 3), round(x,3))) %>% -->
+<!--     dplyr::mutate( -->
+<!--       Term = ifelse(row_number()>1 & term == lag(term), NA_character_, gsub("conc_25OHD","conc 25(OH)D",term)), -->
+<!--        `OR (95% CI)` = paste0(as.character(estimate)," (",as.character(conf.low),"-",as.character(conf.high),")"), -->
+<!--        `P-value` = p.value, -->
+<!--       Stratum = curr_strata, -->
+<!--       Stratum = ifelse(row_number()==1, Stratum,NA_character_), -->
+<!--     ) %>% -->
+<!--     dplyr::rename( -->
+<!--       Contrast = contrast, -->
+<!--       Level = sym(stratum) -->
+<!--      ) %>% -->
+<!--     dplyr::select(Term, Contrast, Stratum, Level,`OR (95% CI)`,  `P-value`) -->
+
+<!--   return(list(avg,w)) -->
+<!-- }) -->
+<!-- names(results_list_maternal) <- maternal_covariates[c(2:3)] -->
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- for(ii in seq_along(names(results_list_maternal))) { -->
+<!--   if (ii == 1) { -->
+<!--     maternal_25OHD_diagnosis_results <- results_list_maternal[[ii]][[1]] -->
+<!--   } else { -->
+<!--     maternal_25OHD_diagnosis_results <- rbind(maternal_25OHD_diagnosis_results, results_list_maternal[[ii]][[1]]) -->
+<!--   } -->
+<!-- } -->
+
+<!-- maternal_25OHD_diagnosis_results <- as.data.frame(maternal_25OHD_diagnosis_results) -->
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- maternal_25OHD_diagnosis_results %>% -->
+<!--   as.data.frame() %>% -->
+<!--   flextable::flextable() %>% -->
+<!--   flextable::autofit() %>% -->
+<!--   flextable::color( -->
+<!--     i = ~ `P-value` < 0.05, -->
+<!--     j = c("Contrast", "P-value"), -->
+<!--     color = "red") -->
+<!-- ``` -->
+
+<!-- Cox analysis -->
+
+<!-- conducting a time-to-event Cox regression with: -->
+
+<!--  - Time scale: Age (from birth) -->
+
+<!--  - Exposure: Fixed (cord blood 25(OH)D) -->
+
+<!--  - Follow-up ends: December 31, 2020 -->
+
+<!-- Outcome: T1D diagnosis -->
+<!-- ```{r event_time_formulation, warning=FALSE} -->
+<!-- vitamin_d_case_control_plus_abis$start_age <- 0  # since follow-up starts at birth -->
+
+<!-- # Set exit date based on whether T1D occurred before 2020-12-31 -->
+<!-- vitamin_d_case_control_plus_abis$exit_date <- ifelse( -->
+<!--   !is.na(vitamin_d_case_control_plus_abis$T1D_age_diagnosis) & -->
+<!--     vitamin_d_case_control_plus_abis$INDATUMA <= as.Date("2020-12-31"), -->
+<!--   vitamin_d_case_control_plus_abis$INDATUMA, -->
+<!--   as.Date("2020-12-31") -->
+<!-- ) -->
+
+<!-- vitamin_d_case_control_plus_abis$exit_date <- as.Date(vitamin_d_case_control_plus_abis$exit_date) -->
+
+<!-- # Calculate age at exit in years -->
+<!-- vitamin_d_case_control_plus_abis$exit_age <- as.numeric( -->
+<!--   difftime( -->
+<!--     vitamin_d_case_control_plus_abis$exit_date, -->
+<!--     vitamin_d_case_control_plus_abis$child_dob, -->
+<!--     units = "days" -->
+<!--   ) -->
+<!-- ) / 365.25 -->
+
+<!-- vitamin_d_case_control_plus_abis$event <- ifelse( -->
+<!--   !is.na(vitamin_d_case_control_plus_abis$INDATUMA) & -->
+<!--     vitamin_d_case_control_plus_abis$INDATUMA <= as.Date("2020-12-31"), -->
+<!--   1, -->
+<!--   0 -->
+<!-- ) -->
+<!-- ``` -->
+
+
+<!-- ```{r cox_data, warning=FALSE} -->
+<!-- df_cox_full <- vitamin_d_case_control_plus_abis %>% -->
+<!--   dplyr::select(all_of( -->
+<!--     c( -->
+<!--       "ABISnr", -->
+<!--       "DBP", -->
+<!--       "conc_25OHD", -->
+<!--       "diagnosis", -->
+<!--       "child_dob", -->
+<!--       "First_degree_T1D_heredity_cat", -->
+<!--       "Preterm_group", -->
+<!--       "Preterm_dichotomous", -->
+<!--       "Delivery_mode", -->
+<!--       "Gestational_age", -->
+<!--       "Birth_weight", -->
+<!--       "Birth_weight_cat", -->
+<!--       "Birth_height", -->
+<!--       "Season", -->
+<!--       "Parity", -->
+<!--       "Smoking_during_pregnancy", -->
+<!--       "Vitamin_mineral_supplement_pregnancy", -->
+<!--       "Fish_lake_pregnancy", -->
+<!--       "Fish_Baltic_pregnancy", -->
+<!--       "Fish_other_pregnancy", -->
+<!--       "Fish_any_pregnancy", -->
+<!--       "Sex_cat", -->
+<!--       # "HDIA", -->
+<!--       "DIAGNOS", -->
+<!--       # "INDATUMA", -->
+<!--       # "UTDATUMA", -->
+<!--       # "SOURCE", -->
+<!--       "T1D_age_diagnosis", -->
+<!--       "onset_age_group", -->
+<!--       "Birth_weight_cat", -->
+<!--       "day_of_year", -->
+<!--       # "Ai", -->
+<!--       # "adjusted_25OHD", -->
+<!--       "start_age", -->
+<!--       "exit_date", -->
+<!--       "exit_age", -->
+<!--       "event" -->
+<!--     ) -->
+<!--   )) -->
+<!-- ``` -->
+
+<!-- ```{r remove_missing_rows} -->
+<!-- df_cox_full <- df_cox_full %>% -->
+<!--   dplyr::select(all_of( -->
+<!--     c( -->
+<!--       "ABISnr", -->
+<!--       "diagnosis", -->
+<!--       "conc_25OHD", -->
+<!--       "exit_age", -->
+<!--       "event", -->
+<!--       "Birth_weight_cat", -->
+<!--       child_covariates, -->
+<!--       maternal_covariates -->
+<!--     ) -->
+<!--   )) %>% -->
+<!--   tidyr::drop_na() -->
+<!-- ``` -->
+
+<!-- Cox regression	Hazard ratio: relative rate of developing T1D at any given age.  -->
+
+<!-- ```{r cox_model} -->
+<!-- cox_model <- coxph( -->
+<!--   Surv(exit_age, event = event) ~ conc_25OHD + First_degree_T1D_heredity_cat + -->
+<!--     Smoking_during_pregnancy + Fish_any_pregnancy + Parity + Delivery_mode + -->
+<!--     Preterm_dichotomous + Season + Sex_cat + Birth_weight_cat, -->
+<!--   data = df_cox_full -->
+<!-- ) -->
+<!-- ``` -->
+
+<!-- ```{r cox_results} -->
+<!-- tidy_cox <- tidy(cox_model, exponentiate = TRUE, conf.int = TRUE) -->
+<!-- tidy_cox  %>% -->
+<!--   as.data.frame() %>% -->
+<!--   dplyr::mutate_if(is.numeric, round, 3) %>% -->
+<!--   flextable::flextable() %>% -->
+<!--   flextable::autofit() %>% -->
+<!--   flextable::color( -->
+<!--     i = ~ p.value < 0.05, -->
+<!--     j = c("term", "p.value"), -->
+<!--     color = "red") -->
+<!-- ``` -->
+
+<!-- weightIt to balance out covariates across conc_25OHD exposure/treatment -->
+<!-- ```{r} -->
+<!-- w_25OHD_cox <- weightit( -->
+<!--   conc_25OHD ~  Preterm_dichotomous + Season + First_degree_T1D_heredity_cat + -->
+<!--     Sex_cat + Smoking_during_pregnancy + Fish_any_pregnancy + Delivery_mode + -->
+<!--     Parity + Birth_weight_cat, -->
+<!--   data = df_cox_full, -->
+<!--   method = "ebal", -->
+<!--   maxit = 50000 -->
+<!-- ) -->
+<!-- ``` -->
+
+<!-- Cox regression (weighted)	Hazard ratio: relative rate of developing T1D at any given age. -->
+<!-- ```{r cox_model_weighted} -->
+<!-- cox_model_weighted <- coxph( -->
+<!--   Surv(exit_age, event = event) ~ conc_25OHD + First_degree_T1D_heredity_cat + -->
+<!--     Smoking_during_pregnancy + Fish_any_pregnancy + Parity + Delivery_mode + -->
+<!--     Preterm_dichotomous + Season + Sex_cat + Birth_weight_cat, -->
+<!--   data = df_cox_full, weights = w_25OHD_cox$weights -->
+<!-- ) -->
+<!-- ``` -->
+
+<!-- ```{r cox_weighted_results} -->
+<!-- tidy_cox_weighted <- tidy(cox_model, exponentiate = TRUE, conf.int = TRUE) -->
+<!-- tidy_cox_weighted  %>% -->
+<!--   as.data.frame() %>% -->
+<!--   dplyr::mutate_if(is.numeric, round, 3) %>% -->
+<!--   flextable::flextable() %>% -->
+<!--   flextable::autofit() %>% -->
+<!--   flextable::color( -->
+<!--     i = ~ p.value < 0.05, -->
+<!--     j = c("term", "p.value"), -->
+<!--     color = "red") -->
+<!-- ``` -->

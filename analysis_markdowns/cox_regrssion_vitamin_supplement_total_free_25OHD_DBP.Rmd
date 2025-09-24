@@ -1,0 +1,528 @@
+---
+title: "Cox Proportional Hazards model: Total 25(OH)D || DBP  || Free 25(OH)D"
+
+author: "Debojyoti Das"
+date: "2025-07-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+set output directory
+```{r output_dir, message=FALSE, warning=FALSE}
+output_dir <- "/Users/debda22/OneDrive - Linköpings universitet/T1D_vitamin_D_results/cox_analysis_revision/concentrations_total_free_25OHD_DBP"
+
+if(!dir.exists(output_dir)){
+  dir.create(output_dir, recursive = TRUE)
+} else {
+  cat(paste0(output_dir," is already present!!\n"))
+}
+```
+
+load libraries
+```{r load_libraries, message=FALSE, warning=FALSE}
+pacman::p_load(
+  haven,        
+  zoo,
+  sjlabelled,
+  janitor,       
+  data.table,   
+  ggplot2,
+  comprehenr,  
+  stringr,     
+  rstatix,
+  dplyr,
+  tidyr,
+  forcats,
+  officer,
+  cowplot,
+  ggExtra,
+  ggpubr,
+  GGally,
+  janitor,
+  ggrepel,
+  ggtext,
+  parameters,
+  lme4,
+  broom,
+  pscl,
+  tibble,
+  knitr,
+  ggeffects,
+  cobalt,
+  WeightIt,
+  marginaleffects,
+  survival,
+  survminer,
+  splines,
+  purrr,
+  nnet,
+  magick,
+  patchwork,
+  flextable,
+  ranger,
+  iml
+  )
+```
+
+
+```{r word_sect_properties}
+sect_properties <- prop_section(
+  page_size = page_size(
+    orient = "landscape",
+    height = 11.7,
+    width = 8.3
+  ),
+  page_margins = page_mar(
+    top = 0.5,
+    bottom = 0.5,
+    left = 0.5,
+    right = 0.5,
+    header = 0.3,
+    footer = 0.3,
+    gutter = 0
+  ),
+  type = "continuous"
+)
+```
+
+define paths
+```{r define_paths, eval=TRUE}
+data_root <- "/Users/debda22/OneDrive - Linköpings universitet/"
+data_root <- paste0(data_root,"Linkoping_projects/ABIS_RAW_DATA_SPSS/")
+```
+
+load parameters and helper functions
+```{r}
+source(paste0(data_root,"../../Rmd_and_R_files/T1D_projects/all_parameters_case_control_T1D_vitamin_D.R"))
+source(paste0(data_root,"../../Rmd_and_R_files/T1D_projects/cox_T1D_helper.R"))
+```
+
+
+read/load vitamin_d_case_control_plus_abis for analysis
+```{r}
+vitamin_d_case_control_plus_abis <- read.table(paste0(data_root, "/vitamin_d/vitamin_d_case_control_plus_abis.csv"))
+```
+
+reorder factors
+```{r}
+vitamin_d_case_control_plus_abis$First_degree_T1D_heredity_cat <- factor(
+  vitamin_d_case_control_plus_abis$First_degree_T1D_heredity_cat,
+  levels = c("No", "Yes")
+)
+
+vitamin_d_case_control_plus_abis$Smoking_during_pregnancy <- factor(
+  vitamin_d_case_control_plus_abis$Smoking_during_pregnancy,
+  levels = c("No", "Yes")
+)
+
+vitamin_d_case_control_plus_abis$Parity <- factor(
+  vitamin_d_case_control_plus_abis$Parity,
+  levels = c("First parity", "Previous parity")
+)
+
+vitamin_d_case_control_plus_abis$Preterm_dichotomous <- factor(
+  vitamin_d_case_control_plus_abis$Preterm_dichotomous,
+  levels = c("Normal", "Preterm")
+)
+
+vitamin_d_case_control_plus_abis$Season <- factor(
+  vitamin_d_case_control_plus_abis$Season,
+  levels = c("Autumn", "Spring", "Summer", "Winter")
+)
+
+vitamin_d_case_control_plus_abis$Sex_cat <- factor(
+  vitamin_d_case_control_plus_abis$Sex_cat,
+  levels = c("Boy", "Girl")
+)
+
+vitamin_d_case_control_plus_abis$Fish_any_pregnancy <- factor(
+  vitamin_d_case_control_plus_abis$Fish_any_pregnancy,
+  levels = c("Seldom", "1–2 times week or more"))
+
+vitamin_d_case_control_plus_abis$Delivery_mode <- factor(
+  vitamin_d_case_control_plus_abis$Delivery_mode,
+  levels = c("Normal","caesarean", "other problem"),
+  labels = c("Normal","Caesarean", "Unknown"))
+```
+
+
+```{r}
+qs_birth_weight <- round(quantile(vitamin_d_case_control_plus_abis$Birth_weight, probs = seq(0, 1, 0.25), na.rm = TRUE),2)
+
+vitamin_d_case_control_plus_abis <- vitamin_d_case_control_plus_abis %>%
+    dplyr::mutate(
+        Birth_weight_cat = cut(
+            Birth_weight,
+            breaks = qs_birth_weight,
+            include.lowest = TRUE,
+            labels = c(
+                paste0("≤", qs_birth_weight[2]),                                    
+                paste0(qs_birth_weight[2], "–", qs_birth_weight[3]),                        
+                paste0(qs_birth_weight[3], "–", qs_birth_weight[4]),                           
+                paste0(">", qs_birth_weight[4])                                     
+            )
+        )
+    )
+
+
+```
+
+
+Cox analysis
+
+conducting a time-to-event Cox regression with:
+
+ - Time scale: Age (from birth)
+
+ - Exposure: Fixed (cord blood 25(OH)D)
+
+ - Follow-up ends: December 31, 2020
+
+Outcome: T1D diagnosis
+```{r event_time, warning=FALSE}
+vitamin_d_case_control_plus_abis$start_age <- 0  # since follow-up starts at birth
+
+vitamin_d_case_control_plus_abis$INDATUMA <- as.Date(vitamin_d_case_control_plus_abis$INDATUMA, format = "%Y-%m-%d")
+```
+
+
+```{r event_time_formulation, warning=FALSE}
+# Set exit date based on whether T1D occurred before 2020-12-31
+vitamin_d_case_control_plus_abis$exit_date <- as.Date(ifelse(
+  !is.na(vitamin_d_case_control_plus_abis$T1D_age_diagnosis) &
+    vitamin_d_case_control_plus_abis$INDATUMA<= as.Date("2020-12-31"),
+  vitamin_d_case_control_plus_abis$INDATUMA,
+  as.Date("2020-12-31")
+))
+```
+
+
+```{r event_time_calculation, warning=FALSE}
+# Calculate age at exit in years
+vitamin_d_case_control_plus_abis$exit_age <- as.numeric(
+  difftime(
+    vitamin_d_case_control_plus_abis$exit_date,
+    vitamin_d_case_control_plus_abis$child_dob,
+    units = "days"
+  )
+) / 365.25
+
+vitamin_d_case_control_plus_abis$event <- ifelse(
+  !is.na(vitamin_d_case_control_plus_abis$INDATUMA) &
+    vitamin_d_case_control_plus_abis$INDATUMA <= as.Date("2020-12-31"),
+  1,
+  0
+)
+```
+
+
+```{r cox_data, warning=FALSE}
+df_cox_full <- vitamin_d_case_control_plus_abis %>%
+  dplyr::select(all_of(
+    c(
+      "ABISnr",
+      "DBP",
+      "conc_25OHD",
+      "diagnosis",
+      "child_dob",
+      "First_degree_T1D_heredity_cat",
+      "Preterm_group",
+      "Preterm_dichotomous",
+      "Delivery_mode",
+      "Gestational_age",
+      "Birth_weight",
+      "Birth_weight_cat",
+      "Birth_height",
+      "Season",
+      "Parity",
+      "Smoking_during_pregnancy",
+      "Vitamin_mineral_supplement_pregnancy",
+      "Fish_lake_pregnancy",
+      "Fish_Baltic_pregnancy",
+      "Fish_other_pregnancy",
+      "Fish_any_pregnancy",
+      "Sex_cat",
+      # "HDIA",
+      "DIAGNOS",
+      # "INDATUMA",
+      # "UTDATUMA",
+      # "SOURCE",
+      "T1D_age_diagnosis",
+      "onset_age_group",
+      "Birth_weight_cat",
+      "day_of_year",
+      # "Ai",
+      # "adjusted_25OHD",
+      "start_age",
+      "exit_date",
+      "exit_age",
+      "event"
+    )
+  ))
+```
+
+```{r}
+df_cox_full <- df_cox_full %>%
+  dplyr::mutate(
+    Vitamin_mineral_supplement_pregnancy = ifelse(
+      is.na(Vitamin_mineral_supplement_pregnancy) | Vitamin_mineral_supplement_pregnancy == "Do not know",
+      NA_character_,
+      Vitamin_mineral_supplement_pregnancy)
+  )
+```
+
+0. Create free 25(OH)
+
+assuming conc_25OHD is in nmol/L, DBP in µmol/L
+convert DBP to nmol/L so units are consistent (1 µmol/L = 1000 nmol/L)
+```{r}
+df_cox_full$DBP_nmol <- df_cox_full$DBP * 1000
+df_cox_full$free25OHD <- df_cox_full$conc_25OHD / df_cox_full$DBP_nmol
+df_cox_full$free25OHD_scaled <- scale(df_cox_full$free25OHD)
+```
+
+
+```{r}
+child_covariates <- c("Preterm_dichotomous","Birth_weight", "Season", "Sex_cat")
+
+maternal_covariates <- c(
+  "First_degree_T1D_heredity_cat",
+  "Smoking_during_pregnancy",
+  "Fish_any_pregnancy",
+  "Parity",
+  "Delivery_mode",
+  "Vitamin_mineral_supplement_pregnancy"
+)
+```
+
+1. Cox regression models
+
+Model A: total 25(OH)D
+```{r}
+cox_total <- coxph(
+  as.formula(
+    paste0(
+      "Surv(exit_age, event) ~ conc_25OHD + ",
+      paste0(maternal_covariates, collapse = " + "),
+      " + ",
+      paste0(child_covariates, collapse = " + ")
+  )
+), data = df_cox_full)
+```
+
+
+Model B: DBP
+```{r}
+cox_dbp <- coxph(
+  as.formula(
+    paste0(
+      "Surv(exit_age, event) ~ DBP_nmol + ",
+      paste0(maternal_covariates, collapse = " + "),
+      " + ",
+      paste0(child_covariates, collapse = " + ")
+    )
+  ),
+  data = df_cox_full
+)
+```
+
+
+# Model C: both
+```{r}
+ cox_both <- coxph(
+  as.formula(
+    paste0(
+      "Surv(exit_age, event) ~ conc_25OHD + DBP_nmol + ",
+      paste0(maternal_covariates, collapse = " + "),
+      " + ",
+      paste0(child_covariates, collapse = " + ")
+    )
+  ),
+  data = df_cox_full
+)
+```
+
+# Model D: free 25(OH)D
+```{r}
+cox_free_scaled <- coxph(
+  as.formula(
+    paste0(
+      "Surv(exit_age, event) ~ free25OHD_scaled + ",
+      paste0(maternal_covariates, collapse = " + "),
+      " + ",
+      paste0(child_covariates, collapse = " + ")
+    )
+  ),
+  data = df_cox_full
+)
+```
+
+# Collect tidy results
+```{r}
+cox_results <- list(
+  total = broom::tidy(cox_total, exponentiate=TRUE, conf.int=TRUE),
+  dbp   = broom::tidy(cox_dbp, exponentiate=TRUE, conf.int=TRUE),
+  both  = broom::tidy(cox_both, exponentiate=TRUE, conf.int=TRUE),
+  free_scaled  = broom::tidy(cox_free_scaled, exponentiate=TRUE, conf.int=TRUE)
+)
+```
+
+```{r}
+cox_results
+```
+```{r}
+#-----------------------------------------
+# 2. Random Survival Forest (RSF)
+#-----------------------------------------
+rsf <- ranger(
+  formula = Surv(exit_age, event) ~ conc_25OHD + DBP_nmol + free25OHD +
+    Preterm_dichotomous + Birth_weight_cat + Season + Sex_cat +
+    First_degree_T1D_heredity_cat + Smoking_during_pregnancy +
+    Fish_any_pregnancy + Parity + Delivery_mode +
+    Vitamin_mineral_supplement_pregnancy,
+  data = df_cox_full %>%
+    dplyr::select(
+      exit_age,
+      event,
+      conc_25OHD,
+      DBP_nmol,
+      free25OHD,
+      Preterm_dichotomous,
+      Birth_weight_cat,
+      Season,
+      Sex_cat,
+      First_degree_T1D_heredity_cat,
+      Smoking_during_pregnancy,
+      Fish_any_pregnancy,
+      Parity,
+      Delivery_mode,
+      Vitamin_mineral_supplement_pregnancy,
+    ) %>%
+    tidyr::drop_na(),
+  mtry = 3,
+  importance = "permutation",
+  splitrule = "extratrees",
+  num.trees = 1000,
+  seed = 123,
+  respect.unordered.factors = "partition"
+)
+
+# Variable importance
+print(rsf$variable.importance)
+```
+
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(iml)
+
+#-----------------------------------------
+# 3. SHAP analysis with iml
+#-----------------------------------------
+data <- df_cox_full %>%
+  dplyr::select(
+    exit_age,
+    event,
+    conc_25OHD,
+    DBP_nmol,
+    free25OHD,
+    Preterm_dichotomous,
+    Birth_weight_cat,
+    Season,
+    Sex_cat,
+    First_degree_T1D_heredity_cat,
+    Smoking_during_pregnancy,
+    Fish_any_pregnancy,
+    Parity,
+    Delivery_mode,
+    Vitamin_mineral_supplement_pregnancy
+  ) %>%
+  tidyr::drop_na()
+
+#-----------------------------------------
+# Function to convert survival curve to scalar
+#-----------------------------------------
+time_point <- 20  # e.g., 10-year risk
+
+predict_survprob <- function(model, newdata) {
+  surv <- predict(model, data = newdata)$survival
+  times <- predict(model, data = newdata)$unique.death.times
+  t_idx <- which.min(abs(times - time_point))
+  event_prob <- 1 - surv[, t_idx]  # probability of event by 10 years
+  return(event_prob)
+}
+
+#-----------------------------------------
+# Prepare predictor for iml
+#-----------------------------------------
+predictor <- Predictor$new(
+  model = rsf,
+  data = data[, -c(which(names(data) %in% c("exit_age","event")))],
+  y = data$event,
+  predict.function = predict_survprob
+)
+
+#-----------------------------------------
+# Global feature importance (based on prediction error)
+#-----------------------------------------
+feat_imp <- FeatureImp$new(predictor, loss = "ce")
+plot(feat_imp)
+
+#-----------------------------------------
+# Partial dependence for vitamin D variables
+#-----------------------------------------
+pdp_total <- FeatureEffect$new(predictor, feature = "conc_25OHD", method = "pdp")
+plot(pdp_total)
+
+pdp_dbp <- FeatureEffect$new(predictor, feature = "DBP_nmol", method = "pdp")
+plot(pdp_dbp)
+
+pdp_free <- FeatureEffect$new(predictor, feature = "free25OHD", method = "pdp")
+plot(pdp_free)
+
+#-----------------------------------------
+# Optional: SHAP for one subject
+#-----------------------------------------
+shap_one <- Shapley$new(
+  predictor,
+  x.interest = data[1, -c(which(names(data) %in% c("exit_age","event")))]
+)
+plot(shap_one)
+
+```
+
+```{r}
+library(car)       # for VIF
+library(corrplot)  # for correlation matrix
+
+#-----------------------------------------
+# 1. Correlation matrix
+#-----------------------------------------
+vitd_vars <- df_cox_full %>%
+  dplyr::select(conc_25OHD, DBP_nmol, free25OHD)
+
+cor_mat <- cor(vitd_vars, use = "pairwise.complete.obs")
+print(cor_mat)
+
+# visualize
+corrplot(cor_mat, method = "ellipse", type = "upper",
+         tl.col = "black", tl.srt = 45)
+
+#-----------------------------------------
+# 2. Variance Inflation Factor (VIF)
+#-----------------------------------------
+# Fit a linear model with all three predictors
+lm_test <- lm(conc_25OHD ~ DBP_nmol + free25OHD, data = df_cox_full)
+vif_all <- vif(lm_test)
+print(vif_all)
+
+# Alternatively, VIF from the Cox model itself:
+vif_cox <- vif(cox_all)  # from your multivariable Cox
+print(vif_cox)
+
+```
+
