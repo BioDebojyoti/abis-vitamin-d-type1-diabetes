@@ -1,0 +1,958 @@
+---
+title: "Conditional regression with balancing"
+author: "Debojyoti Das"
+date: "2025-07-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+set output directory
+```{r output_dir, message=FALSE, warning=FALSE}
+output_dir <- "/Users/debda22/Projects/T1D_vitamin_D_results/cox_analysis/conditional_regression/new"
+
+if(!dir.exists(output_dir)){
+  dir.create(output_dir, recursive = TRUE)
+} else {
+  cat(paste0(output_dir," is already present!!\n"))
+}
+```
+
+load libraries
+```{r load_libraries, message=FALSE, warning=FALSE}
+pacman::p_load(
+  haven,        
+  zoo,
+  sjlabelled,
+  janitor,       
+  data.table,   
+  ggplot2,
+  comprehenr,  
+  stringr,     
+  rstatix,
+  dplyr,
+  tidyr,
+  forcats,
+  officer,
+  cowplot,
+  ggExtra,
+  ggpubr,
+  GGally,
+  janitor,
+  ggrepel,
+  ggtext,
+  parameters,
+  lme4,
+  broom,
+  pscl,
+  tibble,
+  knitr,
+  ggeffects,
+  cobalt,
+  WeightIt,
+  marginaleffects,
+  survival,
+  purrr
+  )
+```
+
+define paths
+```{r define_paths, eval=TRUE}
+data_root <- "/Users/debda22/Projects/"
+data_root <- paste0(data_root,"Linkoping_projects/ABIS_RAW_DATA_SPSS/")
+```
+
+load parameters
+```{r}
+source(paste0(data_root,"../../Rmd_and_R_files/T1D_projects/all_parameters_case_control_T1D_vitamin_D.R"))
+```
+
+
+read/load vitamin_d_case_control_plus_abis for analysis
+```{r}
+vitamin_d_case_control_plus_abis <- read.table(paste0(
+  data_root,
+  "/vitamin_d/vitamin_d_case_control_plus_abis.csv"
+  )
+)
+```
+
+reorder factors
+```{r}
+vitamin_d_case_control_plus_abis$First_degree_T1D_heredity_cat <- factor(
+  vitamin_d_case_control_plus_abis$First_degree_T1D_heredity_cat,
+  levels = c("No", "Yes")
+)
+
+vitamin_d_case_control_plus_abis$Smoking_during_pregnancy <- factor(
+  vitamin_d_case_control_plus_abis$Smoking_during_pregnancy,
+  levels = c("No", "Yes")
+)
+
+vitamin_d_case_control_plus_abis$Parity <- factor(
+  vitamin_d_case_control_plus_abis$Parity,
+  levels = c("First parity", "Previous parity")
+)
+
+vitamin_d_case_control_plus_abis$Preterm_dichotomous <- factor(
+  vitamin_d_case_control_plus_abis$Preterm_dichotomous,
+  levels = c("Normal", "Preterm")
+)
+
+vitamin_d_case_control_plus_abis$Season <- factor(
+  vitamin_d_case_control_plus_abis$Season,
+  levels = c("Autumn", "Spring", "Summer", "Winter")
+)
+
+vitamin_d_case_control_plus_abis$Sex_cat <- factor(
+  vitamin_d_case_control_plus_abis$Sex_cat,
+  levels = c("Boy", "Girl")
+)
+
+vitamin_d_case_control_plus_abis$Fish_any_pregnancy <- factor(
+  vitamin_d_case_control_plus_abis$Fish_any_pregnancy,
+  levels = c("Seldom", "1–2 times week or more"))
+
+vitamin_d_case_control_plus_abis$Delivery_mode <- factor(
+  vitamin_d_case_control_plus_abis$Delivery_mode,
+  levels = c("Normal","caesarean", "other problem"),
+  labels = c("Normal","Caesarean", "Vaginal delivery with problem"))
+```
+
+```{r}
+vitamin_d_case_control_plus_abis <- vitamin_d_case_control_plus_abis %>%
+  dplyr::mutate(
+    Vitamin_mineral_supplement_pregnancy = ifelse(
+      is.na(Vitamin_mineral_supplement_pregnancy) | Vitamin_mineral_supplement_pregnancy == "Do not know",
+      NA_character_,
+      Vitamin_mineral_supplement_pregnancy)
+  )
+```
+
+```{r}
+vitamin_d_case_control_plus_abis$Vitamin_mineral_supplement_pregnancy <- factor(vitamin_d_case_control_plus_abis$Vitamin_mineral_supplement_pregnancy)
+```
+
+
+```{r}
+qs_birth_weight <- round(quantile(vitamin_d_case_control_plus_abis$Birth_weight, probs = seq(0, 1, 0.25), na.rm = TRUE),2)
+
+vitamin_d_case_control_plus_abis <- vitamin_d_case_control_plus_abis %>%
+    dplyr::mutate(
+        Birth_weight_cat = cut(
+            Birth_weight,
+            breaks = qs_birth_weight,
+            include.lowest = TRUE,
+            labels = c(
+                paste0("≤", qs_birth_weight[2]),                                    
+                paste0(qs_birth_weight[2], "–", qs_birth_weight[3]),                        
+                paste0(qs_birth_weight[3], "–", qs_birth_weight[4]),                           
+                paste0(">", qs_birth_weight[4])                                     
+            )
+        )
+    )
+
+
+```
+
+
+```{r word_sect_properties}
+sect_properties <- prop_section(
+  page_size = page_size(
+    orient = "landscape",
+    width = 8.3,
+    height = 11.7
+  ),
+  type = "continuous",
+  page_margins = page_mar()
+)
+
+```
+
+
+conditional regression - case-control matching
+
+
+Assessing Balance: A. Check Initial Imbalance
+
+```{r}
+child_covariates <- c("Preterm_dichotomous",
+                      "Birth_weight",
+                      "Birth_weight_cat",
+                      "Season", 
+                      "Sex_cat")
+
+maternal_covariates <- c(
+  "First_degree_T1D_heredity_cat",
+  "Smoking_during_pregnancy",
+  "Fish_any_pregnancy",
+  "Parity",
+  "Delivery_mode",
+  "Vitamin_mineral_supplement_pregnancy"
+)
+```
+
+
+all covariates
+```{r}
+df_all <- vitamin_d_case_control_plus_abis %>%
+  dplyr::select(
+    all_of(c("diagnosis", "conc_25OHD", child_covariates, maternal_covariates))) %>%
+  tidyr::drop_na() 
+```
+
+```{r}
+all_covariates_formula <- paste0(c(child_covariates[-3], maternal_covariates),collapse = " + ")
+all_covariates_formula
+```
+
+
+```{r echo=FALSE}
+w_25OHD_all <- weightit(
+  as.formula(paste0("conc_25OHD ~  ", all_covariates_formula)),
+  data = df_all,
+  method = "ebal"
+)
+```
+
+
+```{r echo=FALSE}
+suppressMessages(
+  fit_25OHD_all <- glm_weightit(
+  as.formula(paste0("diagnosis ~ conc_25OHD * (",all_covariates_formula,")")),
+  data = df_all,
+  weightit = w_25OHD_all,
+  family = binomial
+)
+)
+```
+
+
+```{r echo=FALSE}
+avg_25OHD_all <- avg_comparisons(
+  fit_25OHD_all,
+  type = "link",
+  comparison = "lnor",
+  transform = "exp"
+) %>%
+  broom::tidy() %>%
+  as.data.frame() %>%
+  dplyr::mutate(
+    term = ifelse(row_number()> 1 & term == lag(term),
+                    NA_character_,
+                    gsub("_"," ",gsub("_cat","",gsub("_dichotomous","",gsub("Birth_weight_cat","Birth weight category",term))))
+                    )
+    ) %>%
+  dplyr::mutate_if(is.numeric, function(x) ifelse(x<0.001, formatC(x, format = "e", 3), round(x,3))) %>%
+  dplyr::rename(
+    Term = term,
+    Contrast = contrast,
+    OR = estimate,
+    `P-value` = p.value
+    ) %>%
+  dplyr::mutate(
+        `OR (95% CI)` = paste0(as.character(OR)," (",as.character(conf.low),"-",as.character(conf.high),")")
+  ) %>%
+  dplyr::select(all_of(c("Term", "Contrast","OR (95% CI)", "P-value")))
+
+
+first_row <- avg_25OHD_all %>% dplyr::filter(Term == "conc 25OHD")
+
+other_rows <- avg_25OHD_all %>% dplyr::filter(Term != "conc 25OHD" | is.na(Term))
+
+avg_25OHD_all <- rbind(first_row, other_rows)
+```
+
+Diagnosis ~ conc. 25(OH)D * (all covariates) : weighted data
+```{r echo=FALSE}
+# kable(avg_25OHD_all, caption = "Diagnosis ~ conc. 25(OH)D * (all covariates) : weighted data")
+flex_all_cov_interaction_model <- avg_25OHD_all %>%
+  as.data.frame() %>%
+  flextable::flextable() %>%
+  flextable::autofit() %>%
+  flextable::color(
+    i = ~ `P-value` < 0.05,
+    j = c("Contrast", "P-value"),
+    color = "red")
+```
+
+
+```{r save_}
+flextable::save_as_docx(
+  `Conditional regression interaction model with covariate balancing` = flex_all_cov_interaction_model,
+  path = paste0(output_dir,"/flex_conditional_regression_all_cov_interaction_model.docx"),
+  pr_section = sect_properties
+)
+```
+<!-- ```{r} -->
+<!-- birth_weight_quantiles_all <- quantile(df_all$Birth_weight) -->
+
+<!-- df_all$Birth_weight_cat <- cut( -->
+<!--   df_all$Birth_weight, -->
+<!--   breaks = c( -->
+<!--     birth_weight_quantiles_all[[1]], -->
+<!--     birth_weight_quantiles_all[[2]], -->
+<!--     birth_weight_quantiles_all[[3]], -->
+<!--     birth_weight_quantiles_all[[4]], -->
+<!--     Inf -->
+<!--   ), -->
+<!--   labels = c("q1", "q2", "q3", "q4"), -->
+<!--   include.lowest = TRUE -->
+<!-- ) -->
+<!-- ``` -->
+
+
+```{r}
+df_all_all_cat <- df_all %>% 
+  dplyr::select(-Birth_weight) 
+```
+
+
+```{r}
+all_covariates_cat_formula <- paste0(names(df_all_all_cat)[-c(1:3)],collapse = " + ")
+all_covariates_cat_formula
+```
+
+
+
+```{r echo=FALSE}
+w_25OHD_all_cat <- weightit(
+  as.formula(paste0("conc_25OHD ~  ", all_covariates_cat_formula)),
+  data = df_all_all_cat
+  #,
+  # method = "ebal"
+)
+```
+
+
+```{r echo=FALSE}
+fit_25OHD_all_cat <- glm_weightit(
+  as.formula(paste0("diagnosis ~ conc_25OHD * (",all_covariates_cat_formula,")")),
+  data = df_all_all_cat,
+  weightit = w_25OHD_all_cat,
+  family = binomial
+)
+
+avg_25OHD_all_cat <- avg_comparisons(
+  fit_25OHD_all_cat,
+  type = "link",
+  comparison = "lnor",
+  transform = "exp"
+) %>%
+  broom::tidy() %>%
+  as.data.frame() %>%
+  dplyr::mutate(
+    term = ifelse(row_number()> 1 & term == lag(term),
+                    NA_character_,
+                    gsub("_"," ",gsub("_cat","",gsub("_dichotomous","",gsub("Birth_weight_cat","Birth weight category",term))))
+                    )
+    ) %>%
+  dplyr::mutate_if(is.numeric, function(x) ifelse(x<0.001, formatC(x, format = "e", 3), round(x,3))) %>%
+  dplyr::rename(
+    Term = term,
+    Contrast = contrast,
+    OR = estimate,
+    `P-value` = p.value
+    ) %>%
+  dplyr::mutate(
+        `OR (95% CI)` = paste0(as.character(OR)," (",as.character(conf.low),"-",as.character(conf.high),")")
+  ) %>%
+  dplyr::select(all_of(c("Term", "Contrast","OR (95% CI)", "P-value")))
+
+first_row <- avg_25OHD_all_cat %>% dplyr::filter(Term == "conc 25OHD")
+other_rows <- avg_25OHD_all_cat %>% dplyr::filter(Term != "conc 25OHD" | is.na(Term))
+avg_25OHD_all_cat <- rbind(first_row, other_rows)
+```
+
+Diagnosis ~ conc. 25(OH)D * (all categorical covariates) : weighted data
+```{r echo=FALSE}
+# kable(avg_25OHD_all_cat, caption = "Diagnosis ~ conc. 25(OH)D * (all categorical covariates) : weighted data")
+flex_avg_25OHD_all_cat_interaction_model <- avg_25OHD_all_cat %>%
+  as.data.frame() %>%
+  flextable::flextable() %>%
+  flextable::autofit() %>%
+  flextable::color(
+    i = ~ `P-value` < 0.05,
+    j = c("Contrast", "P-value"),
+    color = "red")
+```
+
+
+
+```{r save_flex_avg_25OHD_all_cat_interaction_model}
+flextable::save_as_docx(
+  `Conditional regression interaction model with covariate (all categorical) balancing` = flex_avg_25OHD_all_cat_interaction_model,
+  path = paste0(output_dir,"/flex_conditional_regression_all_categorical_cov_interaction_model.docx"),
+  pr_section = sect_properties
+)
+```
+
+```{r}
+df_child <- vitamin_d_case_control_plus_abis %>%
+  dplyr::select(ABISnr, diagnosis,conc_25OHD,Preterm_dichotomous,Birth_weight_cat,Season,Sex_cat) %>%
+  tidyr::drop_na()
+```
+
+```{r}
+# fit_25OHD_child_no_match_no_interaction <- glm_weightit(
+#     diagnosis ~ conc_25OHD,
+#     data = df_child,
+#     family = binomial
+#   )
+# 
+# avg_25OHD_child_no_match_no_interaction <- avg_comparisons(
+#   fit_25OHD_child_no_match_no_interaction,
+#   type = "link",
+#   comparison = "lnor",
+#   transform = "exp"
+# ) %>%
+#   broom::tidy() %>%
+#   dplyr::select(term, estimate, p.value, conf.low, conf.high) %>%
+#   dplyr::mutate(term = ifelse(
+#     row_number() > 1 & term == lag(term),
+#     NA_character_,
+#     gsub("_", " ", gsub(
+#       "_cat", "", gsub(
+#         "_dichotomous",
+#         "", gsub("Birth_weight_cat", "Birth weight category", term)))))
+#     ) %>%
+#   dplyr::mutate_if(is.numeric, function(x)
+#     ifelse(x < 0.001, formatC(x, format = "e", 3), round(x, 3))) %>%
+#   dplyr::rename(
+#     Term = term,
+#     OR = estimate,
+#     `P-value` = p.value
+#   ) %>%
+#   dplyr::mutate(
+#         `OR (95% CI)` = paste0(as.character(OR)," (",as.character(conf.low),"-",as.character(conf.high),")")
+#   ) %>%
+#   dplyr::select(-all_of(c("OR","conf.low", "conf.high"))) %>%
+#   dplyr::select(all_of(c("Term","OR (95% CI)", "P-value")))
+```
+
+<!-- Diagnosis ~ conc. 25(OH)D * (child covariates) : not weighted nointeraction -->
+```{r}
+# kable(
+#   avg_25OHD_child_no_match_no_interaction,
+#   caption = "Diagnosis ~ conc. 25(OH)D * (child covariates) : not weighted nointeraction")
+
+# avg_25OHD_child_no_match_no_interaction %>%
+#   as.data.frame() %>%
+#   flextable::flextable() %>%
+#   flextable::autofit()
+```
+
+glm diagnosis ~ conc_25OHD; case-control matched by child (birth) covariates
+```{r}
+w_25OHD_child <- weightit(
+    conc_25OHD ~ Preterm_dichotomous + Season + Sex_cat + Birth_weight_cat,
+    data = df_child
+    #,
+    # method = "ebal"
+  )
+
+# fit_25OHD_child_cov_matched_no_interaction <- glm_weightit(
+#     diagnosis ~ conc_25OHD,
+#     data = df_child,
+#     weightit = w_25OHD_child,
+#     family = binomial
+#   )
+# 
+# avg_25OHD_child_cov_matched_no_interaction <- avg_comparisons(
+#   fit_25OHD_child_cov_matched_no_interaction,
+#   type = "link",
+#   comparison = "lnor",
+#   transform = "exp"
+# ) %>%
+#   broom::tidy() %>%
+#   dplyr::select(term, estimate, p.value, conf.low, conf.high) %>%
+#   dplyr::mutate(term = ifelse(
+#     row_number() > 1 & term == lag(term),
+#     NA_character_,
+#     gsub("_", " ", gsub(
+#       "_cat", "", gsub(
+#         "_dichotomous",
+#         "", gsub("Birth_weight_cat", "Birth weight category", term)))))
+#     ) %>%
+#   dplyr::mutate_if(is.numeric, function(x)
+#     ifelse(x < 0.001, formatC(x, format = "e", 3), round(x, 3))) %>%
+#   dplyr::rename(
+#     Term = term,
+#     OR = estimate,
+#     `P-value` = p.value
+#   ) %>%
+#   dplyr::mutate(
+#         `OR (95% CI)` = paste0(as.character(OR)," (",as.character(conf.low),"-",as.character(conf.high),")")
+#   ) %>%
+#   dplyr::select(-all_of(c("OR","conf.low", "conf.high"))) %>%
+#   dplyr::select(all_of(c("Term","OR (95% CI)", "P-value")))
+```
+
+<!-- Diagnosis ~ conc. 25(OH)D * (child covariates) : weighted but no interaction -->
+<!-- ```{r} -->
+<!-- # kable( -->
+<!-- #   avg_25OHD_child_cov_matched_no_interaction, -->
+<!-- #   caption = "Diagnosis ~ conc. 25(OH)D * (child covariates) : weighted but no interaction") -->
+
+<!-- avg_25OHD_child_cov_matched_no_interaction %>% -->
+<!--   as.data.frame() %>% -->
+<!--   flextable::flextable() %>% -->
+<!--   flextable::autofit() -->
+<!-- ``` -->
+
+
+```{r}
+fit_25OHD_child_cov_matched_and_with_interaction <- glm_weightit(
+    diagnosis ~ conc_25OHD*(Preterm_dichotomous + Season + Sex_cat + Birth_weight_cat),
+    data = df_child,
+    weightit = w_25OHD_child,
+    family = binomial
+  )
+
+avg_25OHD_child_cov_matched_and_with_interaction <- avg_comparisons(
+  fit_25OHD_child_cov_matched_and_with_interaction,
+  type = "link",
+  comparison = "lnor",
+  transform = "exp"
+) %>%
+  broom::tidy() %>%
+  dplyr::select(term, contrast, estimate, p.value, conf.low, conf.high) %>%
+  dplyr::mutate(term = ifelse(
+    row_number() > 1 & term == lag(term),
+    NA_character_,
+    gsub("_", " ", gsub(
+      "_cat", "", gsub(
+        "_dichotomous",
+        "", gsub("Birth_weight_cat", "Birth weight category", term)))))
+    ) %>%
+  dplyr::mutate_if(
+    is.numeric, function(x)
+    ifelse(x < 0.001, 
+           formatC(x, format = "e", 2), 
+           formatC(x, format = "f", 3))
+    ) %>%
+  dplyr::rename(
+    Term = term,
+    Contrast = contrast,
+    OR = estimate,
+    `P-value` = p.value
+  ) %>%
+  dplyr::mutate(
+        `OR (95% CI)` = paste0(as.character(OR)," (",as.character(conf.low),"-",as.character(conf.high),")")
+  ) %>%
+  dplyr::select(all_of(c("Term", "Contrast","OR (95% CI)", "P-value"))) 
+
+first_row <- avg_25OHD_child_cov_matched_and_with_interaction %>%
+  dplyr::filter(Term == "conc 25OHD")
+other_rows <- avg_25OHD_child_cov_matched_and_with_interaction %>%
+  dplyr::filter(Term != "conc 25OHD" | is.na(Term))
+
+avg_25OHD_child_cov_matched_and_with_interaction <- rbind(first_row, other_rows)
+```
+
+Diagnosis ~ conc. 25(OH)D * (child covariates) : weighted and with interaction
+```{r}
+flex_avg_25OHD_child_cov_matched_and_with_interaction <- avg_25OHD_child_cov_matched_and_with_interaction %>%
+  as.data.frame() %>%
+  flextable::flextable() %>%
+  flextable::autofit() %>%
+  flextable::color(
+    i = ~ as.numeric(`P-value`) < 0.05,
+    j = c("Contrast", "P-value"),
+    color = "red")
+```
+
+```{r save_flex_avg_25OHD_child_cov_matched_and_with_interaction}
+flextable::save_as_docx(
+  `Conditional regression interaction model with child covariate balancing` = flex_avg_25OHD_child_cov_matched_and_with_interaction,
+  path = paste0(output_dir,"/flex_conditional_regression_child_cov_interaction_model.docx"),
+  pr_section = sect_properties
+)
+```
+
+```{r}
+results_list_child <- lapply(c("Season", "Sex_cat", "Birth_weight_cat", "Preterm_dichotomous"), 
+  function(stratum) {
+    covariates2match <- paste0(setdiff(c("Season", "Sex_cat", "Birth_weight_cat", "Preterm_dichotomous"),stratum), collapse = " + ")
+    formula2use <- paste0("conc_25OHD ~ ", covariates2match)
+    
+    print(covariates2match)
+    print(formula2use)
+    
+    w <- weightit(
+    as.formula(formula2use),
+    data = df_child,
+    by = as.formula(paste0("~", stratum))
+    #,
+    # method = "ebal"
+  )
+    formula2fit <- paste0("diagnosis ~ conc_25OHD * (",covariates2match,")")
+    print(formula2fit)
+    print("###")
+    
+  fit <- glm_weightit(
+    as.formula(formula2fit),
+    data = df_child,
+    weightit = w,
+    family = binomial
+  )
+  avg <- avg_comparisons(
+    fit,
+    variables = "conc_25OHD",
+    by = stratum,
+    type = "link",
+    comparison = "lnor",
+    transform = "exp"
+  ) %>%
+    broom::tidy() %>%
+    dplyr::mutate_if(
+      is.numeric, function(x) ifelse(x<0.001, 
+                                     formatC(x, format = "e", 2),  
+                                     formatC(x, format = "f", 3))) %>%
+    dplyr::mutate(
+      Term = ifelse(row_number()>1 & term == lag(term), NA_character_, gsub("conc_25OHD","conc 25(OH)D",term)),
+       `OR (95% CI)` = paste0(as.character(estimate)," (",as.character(conf.low),"-",as.character(conf.high),")"),
+       `P-value` = p.value,
+      Stratum = gsub("_", " ", 
+                     gsub("_cat", "", 
+                          gsub("_dichotomous","", 
+                               gsub("Birth_weight_cat", 
+                                    "Birth weight category", stratum)
+                               )
+                          )
+                     ),
+      Stratum = ifelse(row_number()==1, Stratum,NA_character_),
+    ) %>%
+    dplyr::rename(
+      Contrast = contrast,
+      Level = sym(stratum)
+     ) %>%
+    dplyr::select(Term, Contrast, Stratum, Level,`OR (95% CI)`,  `P-value`)
+    # dplyr::rename(level = !!stratum) %>%
+    # dplyr::mutate(strata = stratum) %>%
+    # dplyr::select(Term, Contrast, strata, level, estimate, p.value, conf.low, conf.high)
+  return(list(avg, w, fit))
+})
+names(results_list_child) <- c("Season", "Sex_cat", "Birth_weight_cat", "Preterm_dichotomous")
+```
+
+```{r}
+cowplot::plot_grid(
+    love.plot(results_list_child[[1]][[2]], title = ""),
+    love.plot(results_list_child[[2]][[2]], title = ""),
+    love.plot(results_list_child[[3]][[2]], title = ""),
+    love.plot(results_list_child[[4]][[2]], title = ""),
+    labels = c("A. Season",
+               "B. Sex",
+               "C. Birth weight category",
+               "D. Preterm-birth"
+               ),
+    nrow = 2,
+    ncol = 2
+    )
+```
+
+save stratum stratified weight matched
+```{r}
+ggsave(
+  filename = paste0(output_dir, "/conc_25OHD_child_covariate_correlations_entropy_balanced.jpeg"),
+  plot = cowplot::plot_grid(
+    love.plot(results_list_child[[1]][[2]], title = ""),
+    love.plot(results_list_child[[2]][[2]], title = ""),
+    love.plot(results_list_child[[3]][[2]], title = ""),
+    love.plot(results_list_child[[4]][[2]], title = ""),
+    labels = c("A. Season",
+               "B. Sex",
+               "C. Birth weight category",
+               "D. Preterm-birth"
+               )
+    ),
+  dpi = 300,
+  units = "in",
+  type = "cairo",
+  width = 10.3,
+  height = 14.7
+)
+```
+
+
+```{r}
+for(ii in seq_along(names(results_list_child))) {
+  if (ii == 1) {
+    child_25OHD_diagnosis_results <- results_list_child[[ii]][[1]]
+  } else {
+    child_25OHD_diagnosis_results <- rbind(child_25OHD_diagnosis_results, results_list_child[[ii]][[1]])
+  }
+}
+```
+
+
+```{r}
+# child_25OHD_diagnosis_results <- child_25OHD_diagnosis_results %>%
+#   dplyr::mutate(
+#     strata = ifelse(row_number()> 1 & strata == lag(strata),
+#                     NA_character_,
+#                     gsub("_"," ",gsub("_cat","",gsub("_dichotomous","",gsub("Birth_weight_cat","Birth weight category",strata))))
+#                     )
+#     ) %>%
+#   dplyr::mutate_if(is.numeric, function(x) ifelse(x<0.001, formatC(x, format = "e", 3), round(x,3))) %>%
+#   dplyr::rename(
+#     Strata = strata,
+#     Level = level,
+#     OR = estimate,
+#     `P-value` = p.value
+#     ) %>%
+#   dplyr::mutate(
+#         `OR (95% CI)` = paste0(as.character(OR)," (",as.character(conf.low),"-",as.character(conf.high),")")
+#   ) %>%
+#   dplyr::select(-all_of(c("OR","conf.low", "conf.high"))) %>%
+#   dplyr::select(all_of(c("Strata", "Level","OR (95% CI)", "P-value")))
+
+flex_child_25OHD_diagnosis_results <- child_25OHD_diagnosis_results %>%
+  as.data.frame() %>%
+  flextable::flextable() %>%
+  flextable::autofit() %>%
+  flextable::color(
+    i = ~ `P-value` < 0.05,
+    j = c("Level", "P-value"),
+    color = "red")
+
+flex_child_25OHD_diagnosis_results
+```
+
+```{r save_flex_child_25OHD_diagnosis_results}
+flextable::save_as_docx(
+  `Conditional regression: stratified interaction model with child covariate balancing` = flex_child_25OHD_diagnosis_results,
+  path = paste0(output_dir,"/flex_conditional_regression_child_cov_stratified_interaction_model.docx"),
+  pr_section = sect_properties
+)
+```
+
+```{r}
+maternal_covariates <- c(
+  "First_degree_T1D_heredity_cat",
+  "Smoking_during_pregnancy",
+  "Fish_any_pregnancy",
+  "Parity",
+  "Delivery_mode",
+  "Vitamin_mineral_supplement_pregnancy"
+)
+```
+
+```{r}
+df_maternal <- vitamin_d_case_control_plus_abis %>%
+  dplyr::select(
+    all_of(c("ABISnr", "diagnosis", "conc_25OHD", maternal_covariates))) %>%
+  tidyr::drop_na()
+```
+
+no stratification
+```{r echo=FALSE}
+w_25OHD_maternal <- weightit(
+  conc_25OHD ~  First_degree_T1D_heredity_cat + Smoking_during_pregnancy + 
+    Fish_any_pregnancy + Parity + Delivery_mode + Vitamin_mineral_supplement_pregnancy,
+  data = df_maternal
+  #,
+  # method = "ebal"
+)
+
+
+fit_25OHD_maternal <- glm_weightit(
+  diagnosis ~ conc_25OHD * (
+    First_degree_T1D_heredity_cat + Smoking_during_pregnancy + 
+      Fish_any_pregnancy + Parity + Delivery_mode + Vitamin_mineral_supplement_pregnancy
+  ),
+  data = df_maternal,
+  weightit = w_25OHD_maternal,
+  family = binomial
+)
+
+avg_25OHD_maternal <- avg_comparisons(
+  fit_25OHD_maternal,
+  type = "link",
+  comparison = "lnor",
+  transform = "exp"
+) %>%
+  broom::tidy() %>%
+  as.data.frame() %>%
+  dplyr::mutate(term = ifelse(
+    row_number() > 1 & term == lag(term),
+    NA_character_,
+    gsub("_", " ", gsub(
+      "_cat", "", gsub(
+        "_dichotomous",
+        "",
+        gsub("Birth_weight_cat", "Birth weight category", term)
+      )
+    ))
+  )) %>%
+  dplyr::mutate_if(is.numeric, function(x) ifelse(x<0.001, formatC(x, format = "e", 3), round(x,3))) %>%
+  dplyr::rename(
+    Term = term,
+    Contrast = contrast,
+    OR = estimate,
+    `P-value` = p.value
+    ) %>%
+  dplyr::mutate(
+        `OR (95% CI)` = paste0(as.character(OR)," (",as.character(conf.low),"-",as.character(conf.high),")")
+  ) %>%
+  dplyr::select(all_of(c("Term", "Contrast","OR (95% CI)", "P-value")))
+
+first_row <- avg_25OHD_maternal %>%
+  dplyr::filter(Term == "conc 25OHD")
+other_rows <- avg_25OHD_maternal %>%
+  dplyr::filter(Term != "conc 25OHD" | is.na(Term))
+
+avg_25OHD_maternal <- rbind(first_row, other_rows)
+  
+flex_avg_25OHD_maternal_cov_matched_and_with_interaction <- avg_25OHD_maternal %>%
+  as.data.frame() %>%
+  flextable::flextable() %>%
+  flextable::autofit() %>%
+  flextable::color(
+    i = ~ `P-value` < 0.05,
+    j = c("Contrast", "P-value"),
+    color = "red")
+```
+
+```{r save_flex_avg_25OHD_maternal_cov_matched_and_with_interaction}
+flextable::save_as_docx(
+  `Conditional regression: interaction model with maternal covariate balancing` = flex_avg_25OHD_maternal_cov_matched_and_with_interaction,
+  path = paste0(output_dir,"/flex_conditional_regression_maternal_cov_interaction_model.docx"),
+  pr_section = sect_properties
+)
+```
+
+diagnosis ~ conc_25OHD with stratified maternal covariates
+```{r warning=FALSE}
+results_list_maternal <- lapply(maternal_covariates, function(stratum) {
+
+  curr_strata <- gsub("_", " ", 
+                      gsub("_cat", "", 
+                           gsub( "_during_pregnancy", " (pregnancy) ", 
+                                 gsub("_any_pregnancy", " any (pregnancy) ", 
+                                      stratum)
+                                 )
+                           )
+                      )
+
+    covariates2match <- paste0(
+      setdiff(c("First_degree_T1D_heredity_cat", "Smoking_during_pregnancy",
+    "Fish_any_pregnancy", "Parity", "Delivery_mode", "Vitamin_mineral_supplement_pregnancy"), stratum), collapse = " + ")
+    formula2use <- paste0("conc_25OHD ~ ", covariates2match)
+    
+    print(covariates2match)
+    print(formula2use)
+    
+    w <- weightit(
+    as.formula(formula2use),
+    data = df_maternal,
+    by = as.formula(paste0("~", stratum))
+    #,
+    # method = "ebal"
+    )
+    
+    formula2fit <- paste0("diagnosis ~ conc_25OHD * (",covariates2match,")")
+    print(formula2fit)
+    print("###")
+
+    fit <- glm_weightit(
+    as.formula(formula2fit),
+    data = df_maternal,
+    weightit = w,
+    family = binomial
+    )
+
+    avg <- avg_comparisons(
+    fit,
+    variables = "conc_25OHD",
+    by = stratum,
+    type = "link",
+    comparison = "lnor",
+    transform = "exp"
+    ) %>%
+    broom::tidy() %>%
+    dplyr::mutate_if(
+      is.numeric, function(x) ifelse(x<0.001, 
+                                     formatC(x, format = "e", 2),  
+                                     formatC(x, format = "f", 3))) %>%
+    dplyr::mutate(
+      Term = ifelse(row_number()>1 & term == lag(term), NA_character_, gsub("conc_25OHD","conc 25(OH)D",term)),
+       `OR (95% CI)` = paste0(as.character(estimate)," (",as.character(conf.low),"-",as.character(conf.high),")"),
+       `P-value` = p.value,
+      Stratum = curr_strata,
+      Stratum = ifelse(row_number()==1, Stratum,NA_character_),
+    ) %>%
+    dplyr::rename(
+      Contrast = contrast,
+      Level = sym(stratum)
+     ) %>%
+    dplyr::select(Term, Contrast, Stratum, Level,`OR (95% CI)`,  `P-value`)
+
+  return(list(avg,w, fit))
+})
+names(results_list_maternal) <- maternal_covariates
+```
+
+
+```{r}
+for(ii in seq_along(names(results_list_maternal))) {
+  if (ii == 1) {
+    maternal_25OHD_diagnosis_results <- results_list_maternal[[ii]][[1]]
+  } else {
+    maternal_25OHD_diagnosis_results <- rbind(maternal_25OHD_diagnosis_results, results_list_maternal[[ii]][[1]])
+  }
+}
+
+maternal_25OHD_diagnosis_results <- as.data.frame(maternal_25OHD_diagnosis_results)
+```
+
+```{r}
+ggsave(
+  filename = paste0(output_dir, "/conc_25OHD_maternal_covariate_correlations_entropy_balanced.jpeg"),
+  plot = cowplot::plot_grid(
+    love.plot(results_list_maternal[[1]][[2]], title = ""),
+    love.plot(results_list_maternal[[2]][[2]], title = ""),
+    love.plot(results_list_maternal[[3]][[2]], title = ""),
+    love.plot(results_list_maternal[[4]][[2]], title = ""),
+    love.plot(results_list_maternal[[5]][[2]], title = ""),
+    love.plot(results_list_maternal[[6]][[2]], title = ""),
+    labels = c("A. First-degree T1D heredity",    
+               "B. Smoking during pregnancy",
+               "C. Fish intake pregnancy",
+               "D. Parity",
+               "E. Delivery mode",
+               "F. Vitamin supplement pregnancy"
+               ),
+    nrow = 3, ncol = 2
+    ),
+  dpi = 300,
+  units = "in",
+  type = "cairo",
+  width = 11.67,
+  height = 16.27
+)
+```
+
+```{r}
+flex_stratified_maternal_25OHD_diagnosis_results <- maternal_25OHD_diagnosis_results %>%
+  as.data.frame() %>%
+  flextable::flextable() %>%
+  flextable::autofit() %>%
+  flextable::color(
+    i = ~ `P-value` < 0.05,
+    j = c("Contrast", "P-value"),
+    color = "red")
+
+flex_stratified_maternal_25OHD_diagnosis_results
+```
+
+```{r save_flex_stratified_maternal_25OHD_diagnosis_results}
+flextable::save_as_docx(
+  `Conditional regression: stratified interaction model with maternal covariate balancing` = flex_stratified_maternal_25OHD_diagnosis_results,
+  path = paste0(output_dir,"/flex_conditional_regression_maternal_cov_stratified_interaction_model.docx"),
+  pr_section = sect_properties
+)
+```
