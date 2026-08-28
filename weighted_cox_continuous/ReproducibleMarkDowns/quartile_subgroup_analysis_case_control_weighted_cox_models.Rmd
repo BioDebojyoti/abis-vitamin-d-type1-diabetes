@@ -1,0 +1,988 @@
+---
+title: "Subgroup Analysis - Weighted Cox model: quartiles conc_25OHD and DBP"
+author: "Debojyoti Das"
+date: "2026-06-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list = ls())
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+set output directory
+```{r output_dir, message=FALSE, warning=FALSE}
+output_dir <- "/Users/debda22/Projects/abis-vitamin-d-type1-diabetes/results/revision/case_and_control_weighted_cox/quartile_subgroup_analysis"
+
+if(!dir.exists(output_dir)){
+  dir.create(output_dir, recursive = TRUE)
+} else {
+  cat(paste0(output_dir," is already present!!\n"))
+}
+```
+
+load libraries
+```{r load_libraries, message=FALSE, warning=FALSE}
+pacman::p_load(
+  multipleNCC,
+  haven,        
+  zoo,
+  sjlabelled,
+  janitor,       
+  data.table,   
+  ggplot2,
+  comprehenr,  
+  stringr,     
+  rstatix,
+  dplyr,
+  tidyr,
+  forcats,
+  officer,
+  cowplot,
+  ggExtra,
+  ggpubr,
+  GGally,
+  janitor,
+  ggrepel,
+  ggtext,
+  parameters,
+  lme4,
+  broom,
+  pscl,
+  tibble,
+  knitr,
+  ggeffects,
+  cobalt,
+  WeightIt,
+  marginaleffects,
+  survival,
+  survminer,
+  splines,
+  purrr,
+  nnet,
+  magick,
+  patchwork,
+  flextable,
+  aod
+  )
+```
+
+
+```{r word_sect_properties}
+sect_properties <- prop_section(
+  page_size = page_size(
+    orient = "landscape",
+    height = 11.7,
+    width = 8.3
+  ),
+  page_margins = page_mar(
+    top = 0.5,
+    bottom = 0.5,
+    left = 0.5,
+    right = 0.5,
+    header = 0.3,
+    footer = 0.3,
+    gutter = 0
+  ),
+  type = "continuous"
+)
+
+set_flextable_defaults(
+    padding.top = 0, 
+    padding.bottom = 0,
+    line_spacing = 1
+)
+```
+
+
+define paths
+```{r define_paths, eval=TRUE}
+data_root <- "/Users/debda22/Projects/abis-data"
+proj_root <- "/Users/debda22/Projects/abis-vitamin-d-type1-diabetes"
+```
+
+load parameters and helper functions
+```{r}
+source(paste0(proj_root,"/rscripts/all_parameters_case_control_T1D_vitamin_D.R"))
+source(paste0(proj_root,"/rscripts/weighted_cox_T1D_helper.R"))
+```
+
+```{r}
+abis <- readRDS(file.path(data_root,"vitamin_d","covariates.abis.full.cohort.RDS"))
+```
+
+```{r}
+print("ABIS count:")
+print(abis %>% count(par_b))
+```
+
+```{r}
+abis <- abis %>%
+  dplyr::filter(!is.na(child_dob))
+
+print("number of participants with DOB:")
+print(abis %>% nrow())
+print("number of participants in birth questionnaire:")
+print(abis %>% count(par_b))
+```
+
+
+```{r}
+# Set exit date based on whether T1D occurred before 2020-12-31
+abis$exit_date <- as.Date(ifelse(
+  !is.na(abis$INDATUMA) & abis$INDATUMA <= as.Date("2020-12-31"),
+  abis$INDATUMA,
+  as.Date("2020-12-31")
+))
+
+# Calculate age at exit in years
+abis$exit_age <- as.numeric(
+  difftime(
+    abis$exit_date,
+    abis$child_dob,
+    units = "days"
+  )
+) / 365.25
+
+abis$event <- ifelse(!is.na(abis$INDATUMA) & abis$INDATUMA <= as.Date("2020-12-31"),1,0)
+```
+
+```{r}
+print("ABIS - T1D count with birth questionnaire:")
+print(abis %>% count(par_b, event))
+```
+
+
+read/load vitamin_d_case_control_plus_abis for analysis
+```{r}
+vitamin_d_case_control_plus_abis <- read.table(paste0(data_root, "/vitamin_d/vitamin_d_case_control_plus_abis.csv"))
+```
+
+
+```{r}
+vitamin_d_case_control_plus_abis <- vitamin_d_case_control_plus_abis %>%
+  dplyr::mutate(
+    child_dob = lubridate::as_date(child_dob),
+    INDATUMA = lubridate::as_date(INDATUMA),
+  )
+
+for(c in names(vitamin_d_case_control_plus_abis)){
+  curr_class <- class(vitamin_d_case_control_plus_abis[[c]])
+  if(curr_class != "Date" & curr_class == "character"){
+    vitamin_d_case_control_plus_abis[[c]] <- factor(vitamin_d_case_control_plus_abis[[c]])
+  }
+}
+```
+
+reorder factors
+```{r}
+vitamin_d_case_control_plus_abis$T1D_heredity_cat <- factor(
+  vitamin_d_case_control_plus_abis$First_degree_T1D_heredity_cat,
+  levels = c("No", "Yes")
+)
+
+vitamin_d_case_control_plus_abis$Smoking_during_pregnancy <- factor(
+  vitamin_d_case_control_plus_abis$Smoking_during_pregnancy,
+  levels = c("No", "Yes")
+)
+
+vitamin_d_case_control_plus_abis$Parity <- factor(
+  vitamin_d_case_control_plus_abis$Parity,
+  levels = c("First parity", "Previous parity")
+)
+
+vitamin_d_case_control_plus_abis$Preterm_dichotomous <- factor(
+  vitamin_d_case_control_plus_abis$Preterm_dichotomous,
+  levels = c("Normal", "Preterm")
+)
+
+vitamin_d_case_control_plus_abis$Season <- factor(
+  vitamin_d_case_control_plus_abis$Season,
+  levels = c("Autumn", "Spring", "Summer", "Winter")
+)
+
+vitamin_d_case_control_plus_abis$Sex_cat <- factor(
+  vitamin_d_case_control_plus_abis$Sex_cat,
+  levels = c("Boy", "Girl")
+)
+
+vitamin_d_case_control_plus_abis$Fish_any_pregnancy <- factor(
+  vitamin_d_case_control_plus_abis$Fish_any_pregnancy,
+  levels = c("Seldom", "1–2 times week or more"))
+
+vitamin_d_case_control_plus_abis <- vitamin_d_case_control_plus_abis %>%
+  dplyr::mutate(
+    Delivery_mode = ifelse(
+      is.na(Delivery_mode),
+      NA_character_,
+      ifelse(
+        grepl("caesar", Delivery_mode, ignore.case = TRUE),
+        "Caesarean",
+        "Vaginal"
+      )
+    ),
+    Delivery_mode = factor(Delivery_mode, levels = c("Vaginal", "Caesarean"))
+  )
+```
+
+```{r}
+qs_birth_weight <- round(
+  quantile(
+    vitamin_d_case_control_plus_abis$Birth_weight, 
+    probs = seq(0, 1, 0.25), 
+    na.rm = TRUE)
+  ,
+  2)
+
+vitamin_d_case_control_plus_abis <- vitamin_d_case_control_plus_abis %>%
+    dplyr::mutate(
+        Birth_weight_cat = cut(
+            Birth_weight,
+            breaks = qs_birth_weight,
+            include.lowest = TRUE,
+            labels = c(
+                paste0("≤", qs_birth_weight[2]),                                    
+                paste0(qs_birth_weight[2], "–", qs_birth_weight[3]),                        
+                paste0(qs_birth_weight[3], "–", qs_birth_weight[4]),                           
+                paste0(">", qs_birth_weight[4])                                     
+            )
+        )
+    )
+
+
+```
+
+```{r}
+qs_25OHD <- round(quantile(
+  vitamin_d_case_control_plus_abis$conc_25OHD,
+  probs = seq(0, 1, 0.25),
+  na.rm = TRUE
+  ),
+2)
+
+qs_DBP <- round(quantile(
+  vitamin_d_case_control_plus_abis$DBP,
+  probs = seq(0, 1, 0.25),
+  na.rm = TRUE
+  ),
+2)
+```
+
+
+```{r}
+vitamin_d_case_control_plus_abis <- vitamin_d_case_control_plus_abis %>%
+    dplyr::mutate(
+        conc_25OHD = cut(
+            conc_25OHD,
+            breaks = c(-Inf, qs_25OHD[2:4], Inf),
+            include.lowest = TRUE,
+            labels = c(
+                paste0("≤", qs_25OHD[2]),                                    
+                paste0(qs_25OHD[2], "–", qs_25OHD[3]),                        
+                paste0(qs_25OHD[3], "–", qs_25OHD[4]),                           
+                paste0(">", qs_25OHD[4])                                     
+            )
+        ),
+
+        DBP = cut(
+            DBP,
+            breaks = c(-Inf, qs_DBP[2:4], Inf),
+            include.lowest = TRUE,
+            labels = c(
+                paste0("≤", qs_DBP[2]),                                    
+                paste0(qs_DBP[2], "–", qs_DBP[3]),                        
+                paste0(qs_DBP[3], "–", qs_DBP[4]),                           
+                paste0(">", qs_DBP[4])                                     
+            )
+        )
+    )
+
+vitamin_d_case_control_plus_abis$conc_25OHD <-
+  factor(
+    vitamin_d_case_control_plus_abis$conc_25OHD,
+    levels = c("37–52","≤28", "28–37",">52")
+  )
+```
+
+
+Weighted Cox analysis
+
+conducting a time-to-event Cox regression with:
+
+ - Time scale: Age (from birth)
+
+ - Exposure: Fixed (cord blood ferritin)
+
+ - Follow-up ends: December 31, 2020
+
+Outcome: T1D diagnosis
+```{r event_time, warning=FALSE}
+vitamin_d_case_control_plus_abis$start_age <- 0  # since follow-up starts at birth
+
+vitamin_d_case_control_plus_abis$INDATUMA <- as.Date(vitamin_d_case_control_plus_abis$INDATUMA, format = "%Y-%m-%d")
+```
+
+```{r}
+event_time_formulation <- function(data2use, age_cutoff = 5, age_cutoff_lower_limit = 0, age_cutoff_date = as.Date(NA)){
+
+  # Define the age cutoff in years (e.g., 5 for "before age 5")
+  # age_cutoff <- 5
+  # age_cutoff_lower_limit <- 0
+  
+  if(is.na(age_cutoff_date)){
+  data2use <- data2use %>%
+    dplyr::mutate(
+    # Each child's age-based censoring date
+    age_cutoff_date = lubridate::as_date(child_dob) + lubridate::years(age_cutoff)
+  )
+  } else {
+    data2use <- data2use %>%
+        dplyr::mutate(
+          # Each child's age-based censoring date
+          age_cutoff_date = as.Date(age_cutoff_date)
+          )
+  }
+  
+  data2use <- data2use %>%
+  dplyr::mutate(
+    # Each child's age-based censoring date
+    # age_cutoff_date = lubridate::as_date(child_dob) + lubridate::years(age_cutoff),
+
+    # Exit date = minimum of event date and age cutoff date
+    exit_date = lubridate::as_date(
+      pmin(
+        ifelse(!is.na(INDATUMA), INDATUMA, age_cutoff_date),
+        age_cutoff_date,
+        na.rm = TRUE
+      )
+    ),
+
+    # Age at exit in years
+    exit_age = lubridate::time_length(exit_date - child_dob, "years"),
+    # Event indicator: T1D occurred before age cutoff
+    event = ifelse(!is.na(INDATUMA) & INDATUMA <= age_cutoff_date, 1, 0)
+  )
+
+  data2use <- data2use %>%
+  dplyr::mutate(exit_age = exit_age - age_cutoff_lower_limit) %>%
+  dplyr::filter(exit_age > 0)
+
+  return(data2use)
+
+}
+```
+
+
+```{r cox_data, warning=FALSE}
+df_cox_full <- vitamin_d_case_control_plus_abis
+```
+
+
+```{r cox_data, warning=FALSE}
+df_cox_full <- event_time_formulation(
+df_cox_full, 
+age_cutoff_lower_limit = 0, 
+age_cutoff_date = as.Date("2020-12-31")
+)
+
+print(df_cox_full %>% dplyr::count(event))
+```
+
+Case–control weighted Cox (using time-to-event):
+
+f <- n_subcohort_control / n_full_cohort_control
+f_cases <- n_subcohort_cases / n_full_cohort_cases
+
+Due to financial and practical constraints, cord blood samples were analyzed in 
+a randomly selected subset of cohort participants, including 80 of 160 incident
+cases and 300 of 16,000 non-cases. Because biomarker measurements were available
+only for a stratified random subset defined by outcome status, analyses were 
+performed using inverse probability weighted Cox proportional hazards regression. 
+Sampling probabilities were estimated separately for cases and non-cases, and 
+inverse sampling fractions were used as weights to obtain unbiased hazard ratio 
+estimates representative of the full cohort, following methods for two-phase 
+outcome-dependent sampling described by Samuelsen (1997) and Borgan et al. (2000).
+```{r}
+f <- nrow(df_cox_full %>% dplyr::filter(event==0))/ nrow(abis %>% dplyr::filter(event==0))
+f_cases <- nrow(df_cox_full %>% dplyr::filter(event==1))/ nrow(abis %>% dplyr::filter(event==1))
+```
+
+```{r}
+print("Sampling fractions")
+
+print("controls")
+print(paste0(nrow(df_cox_full %>% dplyr::filter(event==0)),"/",  nrow(abis %>% dplyr::filter(event==0)), " = ",f))
+
+print("cases")
+print(paste0(nrow(df_cox_full %>% dplyr::filter(event==1)),"/",  nrow(abis %>% dplyr::filter(event==1)), " = ",f_cases))
+
+```
+
+```{r}
+child_covariates <- c("Preterm_dichotomous","Birth_weight_cat", "Season", "Sex_cat")
+
+maternal_covariates <- c(
+  "T1D_heredity_cat",
+  "Smoking_during_pregnancy",
+  "Fish_any_pregnancy",
+  "Parity",
+  "Delivery_mode",
+  "Vitamin_mineral_supplement_pregnancy"
+)
+```
+
+```{r remove_missing_rows}
+df_cox_full <- df_cox_full %>%
+  dplyr::select(all_of(
+    c(
+      "ABISnr",
+      "diagnosis",
+      "conc_25OHD",
+      "DBP",
+      child_covariates,
+      maternal_covariates,
+      "INDATUMA",
+      "event",
+      "exit_age"
+    )
+  )) %>%
+  dplyr::mutate(ABISnr = as.character(ABISnr)) %>%
+  dplyr::left_join(
+    abis %>% dplyr::select(ABISnr,child_dob),
+    by = "ABISnr"
+  )
+```
+
+
+Weighted Cox regression	Hazard ratio: relative rate of developing T1D at any given age. 
+
+```{r}
+df_cox_full <- df_cox_full %>%
+  dplyr::mutate(
+    ipw = if_else(event == 1, 1 / f_cases, 1 / f)
+  )
+```
+
+```{r}
+base_covars <- c(
+  "T1D_heredity_cat",
+  "Smoking_during_pregnancy",
+  "Fish_any_pregnancy",
+  "Parity",
+  "Delivery_mode",
+  "Vitamin_mineral_supplement_pregnancy",
+  "Preterm_dichotomous",
+  "Birth_weight_cat", 
+  "Season", 
+  "Sex_cat"
+)
+```
+
+```{r}
+run_interaction_analysis <- function(
+    data,
+    exposure,
+    subgroup,
+    covars,
+    time = "exit_age",
+    event = "event"
+) {
+
+  # -----------------------------
+  # Unadjusted Overall Model (New)
+  # -----------------------------
+  formula_unadj <- as.formula(paste0("Surv(", time, ", ", event, ") ~ ", exposure))
+  
+  # Note: Weights are removed here for a purely crude/unadjusted estimate. 
+  # Add weights = ipw back if your study design requires weighted unadj models.
+  model_unadj <- coxph(
+    formula_unadj,
+    data = data,
+    weights = ipw,
+    robust = TRUE
+    )
+  
+
+  
+  unadj_result <- broom::tidy(model_unadj, exponentiate = TRUE, conf.int = TRUE) %>%
+    dplyr::filter(grepl(exposure,term)) %>%
+    dplyr::mutate(
+      subgroup = "Overall",
+      level = "Unadjusted",
+      N = nrow(data),
+      Cases = sum(data[[event]] == 1),
+      p_interaction = NA_real_,
+      Note = NA_character_
+    )
+
+  all_vars <- c(time, event, exposure, subgroup, covars)
+  
+  # -----------------------------
+  # 1. Enforce Complete-Case Analysis Globally
+  # -----------------------------
+  # Correct syntax using if_all() to ensure no missing data across any analytical variables
+  
+  data <- data %>%
+    dplyr::filter(if_all(all_of(all_vars), ~ !is.na(.))) %>%
+    dplyr::mutate(!!subgroup := droplevels(as.factor(.data[[subgroup]])))
+
+  # remove subgroup from covariates
+  covars_sub <- setdiff(covars, subgroup)
+
+  # -----------------------------
+  # 1. Main adjusted model
+  # -----------------------------
+
+  formula_main <- as.formula(
+    paste0(
+      "Surv(", time, ", ", event, ") ~ ",
+      exposure, " + ",
+      paste(covars, collapse = " + ")
+    )
+  )
+
+  
+  model_main <- coxph(
+    formula_main,
+    data = data,
+    weights = ipw,
+    robust = TRUE
+    )
+
+  main_result <- broom::tidy(
+    model_main,
+    exponentiate = TRUE,
+    conf.int = TRUE
+  ) %>%
+    dplyr::filter(grepl(exposure,term)) %>%
+    dplyr::mutate(
+      subgroup = "Overall",
+      level = "Adjusted",
+      N = nrow(data),
+      Cases = sum(data[[event]] == 1),
+      p_interaction = NA_real_,
+      Note = NA_character_
+    )
+  
+  # -----------------------------
+  # 2. Interaction model
+  # -----------------------------
+  # remove NA subgroup rows (important)
+  data <- data %>%
+    dplyr::filter(!is.na(.data[[subgroup]]))
+  
+  # 2. drop unused factor levels (important)
+  data[[subgroup]] <- droplevels(data[[subgroup]])
+  
+  subgroup_levels <- unique(data[[subgroup]])
+
+  # -----------------------------
+  # Interaction model
+  # -----------------------------
+  formula_main_no_subgroup <- as.formula(
+    paste0(
+      "Surv(", time, ", ", event, ") ~ ",
+      exposure, " + ",
+      paste(covars_sub, collapse = " + ")
+    )
+  )
+  
+  formula_interaction <- as.formula(
+      paste0(
+        "Surv(", time, ", ", event, ") ~ ",
+        exposure, "*", subgroup, " + ",
+        paste(covars_sub, collapse = " + ")
+      )
+    )
+  
+  model_main_no_subgroup <- coxph(
+    formula_main_no_subgroup,
+    data = data,
+    weights = ipw,
+    robust = TRUE
+  )
+
+  convergence_note_interaction1 <- NA_character_
+  convergence_note_interaction2 <- NA_character_
+  
+  model_interaction <- withCallingHandlers(
+    coxph(
+      formula_interaction,
+      data = data,
+      weights = ipw,
+      robust = TRUE
+    ),
+    warning = function(w) {
+      convergence_note_interaction1 <<- w$message 
+      invokeRestart("muffleWarning")
+    }
+    )
+
+  
+  # Omnibus LRT p-value for interaction
+  beta <- coef(model_interaction)
+  interaction_indices <- grep(":", names(beta))
+  interaction_test <- withCallingHandlers(
+    wald.test(
+      b = coef(model_interaction), 
+      Sigma = vcov(model_interaction), 
+      Terms = interaction_indices
+      ),
+    warning = function(w) {
+      convergence_note_interaction2 <<- w$message 
+      invokeRestart("muffleWarning")
+    }
+    )
+  
+  p_interaction <- interaction_test$result$chi2["P"]
+
+  convergence_note_interaction <- ifelse((
+    is.na(convergence_note_interaction1) &
+      is.na(convergence_note_interaction2)
+  ),
+  NA_character_,
+  ifelse(
+    !is.na(convergence_note_interaction1) &
+      !is.na(convergence_note_interaction2),
+    paste0(
+      convergence_note_interaction1,
+      convergence_note_interaction2
+    ),
+    ifelse(
+      !is.na(convergence_note_interaction1),
+      convergence_note_interaction1,
+      convergence_note_interaction2
+    )
+  ))
+  # -----------------------------
+  # Stratified subgroup models
+  # -----------------------------
+
+  subgroup_results <- map_df(
+    subgroup_levels,
+    function(level) {
+
+      d <- data %>%
+        dplyr::filter(.data[[subgroup]] == level)
+
+      formula_sub <- as.formula(
+        paste0(
+          "Surv(", time, ", ", event, ") ~ ",
+          exposure, " + ",
+          paste(covars_sub, collapse = " + ")
+        )
+      )
+  
+    convergence_note <- NA_character_
+
+    fit <- tryCatch({
+        withCallingHandlers(
+          coxph(
+            formula_sub, 
+            data = d, 
+            weights = ipw, 
+            robust = TRUE, 
+            control = coxph.control(iter.max = 100)
+            ),
+          warning = function(w) {
+            convergence_note <<- w$message  
+            invokeRestart("muffleWarning")
+          }
+        )
+      }, error = function(e) {
+        convergence_note <<- paste0("Math Error: ", e$message)
+        NULL
+      })
+    
+          # If the math exploded, return an empty row populated with the error note
+      if (is.null(fit)) {
+        return(data.frame(
+          term = exposure, 
+          estimate = NA_real_, 
+          std.error = NA_real_,
+          robust.se = NA_real_,
+          statistic = NA_real_, 
+          p.value = NA_real_, 
+          conf.low = NA_real_, 
+          conf.high = NA_real_,
+          subgroup = subgroup, 
+          level = as.character(level), 
+          N = nrow(d), 
+          Cases = sum(d[[event]] == 1),
+          p_interaction = NA_real_, 
+          Note = convergence_note
+        ))
+      }
+
+      broom::tidy(
+        fit,
+        exponentiate = TRUE,
+        conf.int = TRUE
+      ) %>%
+        dplyr::filter(grepl(exposure,term)) %>%
+        dplyr::mutate(
+          subgroup = subgroup,
+          level = as.character(level),
+          N = nrow(d),
+          Cases = sum(d[[event]] == 1),
+          p_interaction = NA_real_,
+          Note = convergence_note
+        )
+    }
+  )
+
+    subgroup_interaction_results <- data.frame(
+      term = exposure,
+      estimate = NA_real_,
+      std.error = NA_real_,
+      robust.se = NA_real_,
+      statistic = NA_real_,
+      p.value = NA_real_,
+      conf.low = NA_real_,
+      conf.high = NA_real_,
+      subgroup = subgroup,
+      p_interaction = p_interaction,
+      Note = convergence_note_interaction
+    )
+
+  dplyr::bind_rows(
+    unadj_result,
+    main_result,
+    subgroup_interaction_results,
+    subgroup_results
+  ) %>%
+    dplyr::select(
+      exposure = term,
+      subgroup,
+      level,
+      N,
+      Cases,
+      estimate,
+      conf.low,
+      conf.high,
+      p.value,
+      p_interaction,
+      Note
+    )
+}
+```
+
+```{r}
+exposures <- c(
+      "conc_25OHD",
+      "DBP"
+)
+
+subgroups <- c(
+  "Vitamin_mineral_supplement_pregnancy",
+  "Season",
+  "Sex_cat",
+  "T1D_heredity_cat",
+  "Preterm_dichotomous"
+)
+```
+
+
+```{r}
+results <- tidyr::expand_grid(exposure = exposures, subgroup = subgroups) %>%
+  purrr::pmap(
+    ~run_interaction_analysis(
+      data = df_cox_full,
+      exposure = ..1,
+      subgroup = ..2,
+      covars = base_covars
+    )
+  )
+
+```
+
+
+```{r}
+results_table <- results %>%
+  dplyr::bind_rows() %>%
+  dplyr::distinct() %>%
+  dplyr::mutate(Quartile = exposure, .before = 2) %>%
+  dplyr::mutate(
+            Quartile = gsub("conc_25OHD|DBP","",Quartile),
+            exposure = gsub(paste0(sort(unlist(unname(
+              sapply(c("conc_25OHD", "DBP"), function(x)
+                levels(df_cox_full[[x]]))
+            ))), collapse = "|"), "", exposure)
+            ) %>%
+  dplyr::mutate(
+    `HR (95% CI)` = ifelse(
+      is.na(estimate),
+      NA_character_,
+      sprintf(
+      "%.2f (%.2f–%.2f)",
+      estimate,
+      conf.low,
+      conf.high
+      )
+    ),
+    .before = 4 ) %>%
+  dplyr::mutate(
+    p.value = format.pval(p.value, digits = 2, eps = 0.001),
+    `p-value interaction` =   ifelse(
+      is.na(p_interaction), 
+      NA_character_, 
+      ifelse(
+        p_interaction < 0.001,
+        formatC(p_interaction, format = "e", digits = 2),
+        formatC(p_interaction, format = "f", digits = 2)
+      )
+    )
+  ) %>%
+  dplyr::select(
+    -all_of(c("estimate", "conf.low", "conf.high", "p.value", "p_interaction"))
+    )
+```
+
+rearrange results remove duplicate row
+```{r}
+results_table_reformat <- results_table %>% 
+  dplyr::arrange(exposure,subgroup,level) %>%
+  dplyr::mutate(
+    level = ifelse(is.na(level),"Interaction",level)
+    ) %>%
+  dplyr::mutate(
+    level = case_when(
+      level == "Boy" ~ "Male",
+      level == "Girl" ~ "Female",
+      TRUE ~ level
+      ),
+    exposure = case_when(
+      exposure == "conc_25OHD" ~ "conc 25OHD",
+      TRUE ~ exposure)
+  )
+
+results_table_reformat$exposure <- factor(
+  results_table_reformat$exposure, 
+  levels = c(
+      "conc 25OHD",
+      "DBP"
+    )
+  )
+
+results_table_reformat$subgroup <- factor(
+  results_table_reformat$subgroup, 
+  levels = c(
+    "Overall", 
+    "Vitamin_mineral_supplement_pregnancy",
+    "Season",
+    "Sex_cat",
+    "T1D_heredity_cat",
+    "Preterm_dichotomous"
+    )
+  )
+
+results_table_reformat$level <- factor(
+  results_table_reformat$level, 
+  levels = c(
+    "Unadjusted", 
+    "Adjusted", 
+    "Interaction",
+    "Autumn", 
+    "Spring", 
+    "Summer", 
+    "Winter",
+    "No", 
+    "Yes",
+    "Male", 
+    "Female",
+    "Normal",
+    "Preterm"
+    )
+  )
+
+results_table_reformat <- results_table_reformat %>% 
+  dplyr::arrange(exposure,subgroup,level)
+
+df_clean <- results_table_reformat %>%
+  dplyr::filter(row_number() == 1 | if_any(everything(), ~ .x != lag(.x)))
+
+
+```
+
+flextable
+```{r}
+results_table_flex <- df_clean %>% 
+   dplyr::mutate(
+        subgroup = gsub("\\_"," ",gsub("\\_cat","",subgroup))
+        ) %>%
+    dplyr::mutate(
+        exposure = if_else(row_number() != 1 &
+                               (!is.na(lag(exposure,1)) & exposure == lag(exposure, 1)),
+                           NA_character_,
+                           exposure),
+        subgroup = if_else(row_number() != 1 &
+                               (!is.na(lag(subgroup,1)) & subgroup == lag(subgroup, 1)),
+                           NA_character_,
+                           subgroup)
+        ) %>% 
+  dplyr::mutate(
+    level = dplyr::case_when(
+      grepl("infinite argument in coxph.wtest", Note, ignore.case = TRUE) |
+        (!(level %in% c(
+          "Interaction", "Overall"
+        )) & is.na(`HR (95% CI)`)) ~ paste0(level, "\U2021"),
+      TRUE ~ level
+    )
+  ) %>%
+  dplyr::rename(
+    Exposure = exposure,
+    Subgroup = subgroup,
+    `level/Model` = level,
+    ) %>%
+  dplyr::select(-Note) %>%
+  dplyr::mutate(`HR (95% CI)` = ifelse(nchar(`HR (95% CI)`)>18,NA_character_,`HR (95% CI)`)) %>%
+  flextable::flextable() %>% 
+  flextable::add_footer_lines(
+    values = c(
+      "\U2021 Did not converge"
+    )
+  ) %>%
+  flextable::autofit()
+```
+
+```{r word_sect_properties}
+sect_properties <- prop_section(
+  page_size = page_size(
+    orient = "landscape",
+    height = 11.7,
+    width = 8.3
+  ),
+  page_margins = page_mar(
+    top = 0.5,
+    bottom = 0.5,
+    left = 0.5,
+    right = 0.5,
+    header = 0.3,
+    footer = 0.3,
+    gutter = 0
+  ),
+  type = "continuous"
+)
+
+set_flextable_defaults(
+    padding.top = 0, 
+    padding.bottom = 0,
+    line_spacing = 1
+)
+```
+
+```{r save_merged_all_model_results}
+flextable::save_as_docx(
+  `Weighted Cox model: subgroup analysis` = results_table_flex,
+  path = paste0(output_dir,"/flex_merged_all_weighted_cox_results_subgroup_analysis.docx"),
+  pr_section = sect_properties
+)
+
+
+saveRDS(
+  object = results_table_flex,
+  file = paste0(output_dir,"/flex_merged_all_weighted_cox_results_subgroup_analysis.docx.RDS")
+)
+```
+
+
