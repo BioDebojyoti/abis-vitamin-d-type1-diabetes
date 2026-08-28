@@ -1,0 +1,330 @@
+---
+title: "Baseline conc_25OHD and DBP"
+output: html_document
+date: "2026-06-02"
+author: "Debojyoti Das"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+load libraries
+```{r}
+pacman::p_load(
+  dplyr,
+  lubridate,
+  janitor,
+  rstatix,
+  flextable,
+  officer
+)
+```
+
+define paths
+```{r define_paths, eval=TRUE}
+data_root <- "/Users/debda22/Projects/abis-data"
+proj_root <- "/Users/debda22/Projects/abis-vitamin-d-type1-diabetes"
+```
+
+set output directory
+```{r output_dir, message=FALSE, warning=FALSE}
+output_dir <- "/Users/debda22/Projects/abis-vitamin-d-type1-diabetes/results/revision/case_and_control_weighted_cox/baseline"
+
+if(!dir.exists(output_dir)){
+  dir.create(output_dir, recursive = TRUE)
+} else {
+  cat(paste0(output_dir," is already present!!\n"))
+}
+```
+
+read/load vitamin_d_case_control_plus_abis for analysis
+```{r}
+vitamin_d_case_control_plus_abis <- read.table(paste0(data_root, "/vitamin_d/vitamin_d_case_control_plus_abis.csv"))
+```
+
+
+```{r}
+vitamin_d_case_control_plus_abis <- vitamin_d_case_control_plus_abis %>%
+  dplyr::mutate(
+    child_dob = lubridate::as_date(child_dob),
+    INDATUMA = lubridate::as_date(INDATUMA),
+  )
+
+for(c in names(vitamin_d_case_control_plus_abis)){
+  curr_class <- class(vitamin_d_case_control_plus_abis[[c]])
+  if(curr_class != "Date" & curr_class == "character"){
+    vitamin_d_case_control_plus_abis[[c]] <- factor(vitamin_d_case_control_plus_abis[[c]])
+  }
+}
+```
+
+reorder factors
+```{r}
+vitamin_d_case_control_plus_abis$T1D_heredity_cat <- factor(
+  vitamin_d_case_control_plus_abis$First_degree_T1D_heredity_cat,
+  levels = c("No", "Yes")
+)
+
+vitamin_d_case_control_plus_abis$Smoking_during_pregnancy <- factor(
+  vitamin_d_case_control_plus_abis$Smoking_during_pregnancy,
+  levels = c("No", "Yes")
+)
+
+vitamin_d_case_control_plus_abis$Parity <- factor(
+  vitamin_d_case_control_plus_abis$Parity,
+  levels = c("First parity", "Previous parity")
+)
+
+vitamin_d_case_control_plus_abis$Preterm_dichotomous <- factor(
+  vitamin_d_case_control_plus_abis$Preterm_dichotomous,
+  levels = c("Normal", "Preterm")
+)
+
+vitamin_d_case_control_plus_abis$Season <- factor(
+  vitamin_d_case_control_plus_abis$Season,
+  levels = c("Autumn", "Spring", "Summer", "Winter")
+)
+
+vitamin_d_case_control_plus_abis$Sex_cat <- factor(
+  vitamin_d_case_control_plus_abis$Sex_cat,
+  levels = c("Boy", "Girl")
+)
+
+vitamin_d_case_control_plus_abis$Fish_any_pregnancy <- factor(
+  vitamin_d_case_control_plus_abis$Fish_any_pregnancy,
+  levels = c("Seldom", "1–2 times week or more"))
+
+vitamin_d_case_control_plus_abis <- vitamin_d_case_control_plus_abis %>%
+  dplyr::mutate(
+    Delivery_mode = ifelse(
+      is.na(Delivery_mode),
+      NA_character_,
+      ifelse(
+        grepl("caesar", Delivery_mode, ignore.case = TRUE),
+        "Caesarean",
+        "Vaginal"
+      )
+    ),
+    Delivery_mode = factor(Delivery_mode, levels = c("Vaginal", "Caesarean"))
+  )
+
+vitamin_d_case_control_plus_abis <- vitamin_d_case_control_plus_abis %>%
+  dplyr::mutate(
+    diagnosis = factor(diagnosis,levels = c(0,1),labels = c("Control", "T1D"))
+  )
+```
+
+```{r features2check}
+features2check <- names(vitamin_d_case_control_plus_abis)[c(6,8:9,13:21)]
+```
+
+categorical features
+```{r, categorical_features, message=FALSE, warning=FALSE}
+for(m in seq_along(features2check)){
+  
+    v <- features2check[[m]]
+    
+    curr_count_raw <- vitamin_d_case_control_plus_abis %>%
+      janitor::tabyl(!!sym(v), diagnosis) 
+    
+    # Transpose to make rows = group, columns = levels
+    contingency <- as.table(as.matrix(curr_count_raw[, c("Control", "T1D")]))
+    rownames(contingency) <- curr_count_raw[[v]]
+    contingency <- t(contingency)
+    # chi-squared test
+    result <- chisq.test(contingency)
+    curr_count_raw["P.value"] <- NA_real_
+    if(is.na(result$p.value)){
+      curr_count_raw[["P.value"]][1] <- NA_real_
+    } else {
+          curr_count_raw[["P.value"]][1] <- if (result$p.value < 0.001) {
+            formatC(result$p.value, format = "e", digits = 2)  
+          } else {
+              round(result$p.value,3)
+            }
+    }
+
+    curr_count <- curr_count_raw %>% 
+      dplyr::mutate(
+        Control_perc = round(Control/sum(Control)*100,2), 
+        T1D_perc = round(T1D/sum(T1D)*100,2)) %>% 
+      dplyr::mutate(
+        Control=paste0(Control," (",Control_perc,")"), 
+        T1D = paste0(T1D," (",T1D_perc,")")
+        ) %>%
+      dplyr::select(-all_of(c("Control_perc","T1D_perc")))
+    
+    names(curr_count) <- c("Feature", "Control", "T1D","P.value")
+    
+    curr_table <- data.frame(
+      Feature = character(), 
+      Control = character(), 
+      T1D = character(), 
+      P.value = double()
+      )
+
+    curr_table[1,] <- c(v,NA_character_,NA_character_,NA_real_)
+    table2add <-rbind(curr_table, curr_count)
+    if(m==1){
+      final_table_cat <- table2add
+    } else {
+      final_table_cat <- rbind(final_table_cat,table2add)
+    }
+}
+```
+
+continuous features
+```{r continuous_features}
+features2check_numeric <- names(vitamin_d_case_control_plus_abis)[c(10:12)]
+```
+
+```{r, final_table_numeric, message=FALSE, warning=FALSE}
+for(m in seq_along(features2check_numeric)){
+  
+    v <- features2check_numeric[[m]]
+    
+    curr_summary_raw <- vitamin_d_case_control_plus_abis %>% 
+      dplyr::group_by(diagnosis) %>% 
+      dplyr::summarise(
+        mean = mean(!!sym(v), na.rm = TRUE), 
+        sd = sd(!!sym(v), na.rm = TRUE)
+        ) %>% 
+      as.data.frame() %>%
+      dplyr::mutate(
+        stats = paste0(as.character(round(mean,2))," (",as.character(round(sd,2)),")")
+      ) %>%
+      dplyr::select(-all_of(c("mean","sd")))
+    
+    curr_summary <- data.frame(
+      Feature=v,
+      Control=curr_summary_raw$stats[2],
+      T1D=curr_summary_raw$stats[1]
+      )
+    
+    # wilcox test
+    formula2use = paste0(v," ~ diagnosis")
+    df <- vitamin_d_case_control_plus_abis %>%
+      dplyr::select(diagnosis, !!sym(v)) 
+                    
+    wilcox_result <- rstatix::wilcox_test(
+      data = df,
+      formula = as.formula(formula2use),
+      p.adjust.method = "BH"
+      )
+    
+    
+    curr_summary["P.value"] <- NA_real_
+    if(is.na(wilcox_result$p)){
+      curr_summary[["P.value"]][1] <- NA_real_
+    } else {
+          curr_summary[["P.value"]][1] <- if (wilcox_result$p < 0.001) {
+            formatC(wilcox_result$p, format = "e", digits = 2)  
+          } else {
+              round(wilcox_result$p,3)
+            }
+    }
+
+    if(m==1){
+      final_table_numeric <- curr_summary
+    } else {
+      final_table_numeric <- rbind(final_table_numeric,curr_summary)
+    }
+}
+```
+
+```{r final_table_cat}
+final_table_cat <- final_table_cat %>%
+  dplyr::mutate(Feature = ifelse(
+    Feature %in% features2check,
+    Feature,
+    ifelse(is.na(Feature), "\tMissing", paste0("\t", Feature))
+  )) %>%
+  dplyr::mutate(Feature = gsub("_", " ", gsub(
+    "_pregnancy", " (pregnancy)", gsub("_cat", "", 
+                                        gsub("_dichotomous", "", Feature)
+              )
+          )
+      )
+  )
+```
+
+
+concatenate tables for both set of features
+```{r final_table_cat_numeric}
+final_table_cat_numeric <- rbind(
+  data.frame(
+    Feature = "Categorical variable count (%)",
+    Control = NA_character_,
+    T1D = NA_character_,
+    P.value = NA_real_
+  ),
+  final_table_cat,
+  data.frame(
+    Feature = "Continuous variable mean (sd)",
+    Control = NA_character_,
+    T1D = NA_character_,
+    P.value = NA_real_
+  ),
+  final_table_numeric
+)  %>%
+  dplyr::mutate(Feature = gsub(
+    "Gestational_age",
+    "Gestational age (weeks)",
+    gsub(
+      "Birth_height",
+      "Birth height (cm)",
+      gsub("Birth_weight", "Birth weight (kg)", Feature)
+    )
+  )) %>%
+  flextable::flextable() %>%
+  flextable::color(i = ~ Feature == "\tMissing",
+                   j = "Feature",
+                   color = "red") %>%
+  flextable::color(
+    i = ~ grepl("Continuous variable|Categorical variable", Feature),
+    j = "Feature",
+    color = "blue"
+  ) %>%
+  flextable::autofit()
+```
+
+```{r word_sect_properties}
+# sect_properties <- prop_section(
+#   page_size = page_size(
+#     orient = "landscape",
+#     width = 8.3,
+#     height = 11.7
+#   ),
+#   type = "continuous",
+#   page_margins = page_mar()
+# )
+
+sect_properties <- prop_section(
+  page_size = page_size(
+    orient = "landscape",
+    width = 11.7,
+    height = 8.3
+  ),
+  page_margins = page_mar(
+    top = 0.5,
+    bottom = 0.5,
+    left = 0.5,
+    right = 0.5,
+    header = 0.3,
+    footer = 0.3,
+    gutter = 0
+  ),
+  type = "continuous"
+)
+```
+
+
+```{r save_baseline_characteristics_table}
+flextable::save_as_docx(
+  `baseline characteristics table` = final_table_cat_numeric,
+  path = paste0(output_dir,"/baseline_characteristics_table.docx"),
+  pr_section = sect_properties
+)
+```
+

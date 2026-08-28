@@ -1,0 +1,912 @@
+---
+title: "Landmark analysis - Weighted Cox model: 25(OH)D and DBP"
+author: "Debojyoti Das"
+date: "2026-05-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list = ls())
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+set output directory
+```{r output_dir, message=FALSE, warning=FALSE}
+output_dir <- "/Users/debda22/Projects/abis-vitamin-d-type1-diabetes/results/revision/case_and_control_weighted_cox/landmark"
+
+if(!dir.exists(output_dir)){
+  dir.create(output_dir, recursive = TRUE)
+} else {
+  cat(paste0(output_dir," is already present!!\n"))
+}
+```
+
+load libraries
+```{r load_libraries, message=FALSE, warning=FALSE}
+pacman::p_load(
+  haven,        
+  zoo,
+  sjlabelled,
+  janitor,       
+  data.table,   
+  ggplot2,
+  comprehenr,  
+  stringr,     
+  rstatix,
+  dplyr,
+  tidyr,
+  forcats,
+  officer,
+  cowplot,
+  ggExtra,
+  ggpubr,
+  GGally,
+  janitor,
+  ggrepel,
+  ggtext,
+  parameters,
+  lme4,
+  broom,
+  pscl,
+  tibble,
+  knitr,
+  ggeffects,
+  cobalt,
+  WeightIt,
+  marginaleffects,
+  survival,
+  survminer,
+  splines,
+  purrr,
+  nnet,
+  magick,
+  patchwork,
+  flextable
+  )
+```
+
+
+```{r word_sect_properties}
+sect_properties <- prop_section(
+  page_size = page_size(
+    orient = "landscape",
+    height = 11.7,
+    width = 8.3
+  ),
+  page_margins = page_mar(
+    top = 0.5,
+    bottom = 0.5,
+    left = 0.5,
+    right = 0.5,
+    header = 0.3,
+    footer = 0.3,
+    gutter = 0
+  ),
+  type = "continuous"
+)
+
+set_flextable_defaults(
+    padding.top = 0, 
+    padding.bottom = 0,
+    line_spacing = 1
+)
+```
+
+define paths
+```{r define_paths, eval=TRUE}
+data_root <- "/Users/debda22/Projects/abis-data"
+proj_root <- "/Users/debda22/Projects/abis-vitamin-d-type1-diabetes"
+```
+
+load parameters and helper functions
+```{r}
+source(paste0(proj_root,"/rscripts/all_parameters_case_control_T1D_vitamin_D.R"))
+source(paste0(proj_root,"/rscripts/weighted_cox_T1D_helper.R"))
+```
+
+```{r}
+abis <- readRDS(file.path(data_root,"vitamin_d","covariates.abis.full.cohort.RDS"))
+```
+
+```{r}
+abis <- abis %>%
+  dplyr::filter(!is.na(child_dob))
+
+print("number of participants with DOB:")
+print(abis %>% nrow())
+print("number of participants in birth questionnaire:")
+print(abis %>% count(par_b))
+```
+
+window of interest
+```{r}
+event_time_formulation <- function(data2use, age_cutoff = 5, age_cutoff_lower_limit = 0, age_cutoff_date = as.Date(NA)){
+
+  # Define the age cutoff in years (e.g., 5 for "before age 5")
+  # age_cutoff <- 5
+  # age_cutoff_lower_limit <- 0
+  
+  if(is.na(age_cutoff_date)){
+  data2use <- data2use %>%
+    dplyr::mutate(
+    # Each child's age-based censoring date
+    age_cutoff_date = lubridate::as_date(child_dob) + lubridate::years(age_cutoff)
+  )
+  } else {
+    data2use <- data2use %>%
+        dplyr::mutate(
+          # Each child's age-based censoring date
+          age_cutoff_date = as.Date(age_cutoff_date)
+          )
+  }
+  
+  data2use <- data2use %>%
+  dplyr::mutate(
+    # Each child's age-based censoring date
+    # age_cutoff_date = lubridate::as_date(child_dob) + lubridate::years(age_cutoff),
+
+    # Exit date = minimum of event date and age cutoff date
+    exit_date = lubridate::as_date(
+      pmin(
+        ifelse(!is.na(INDATUMA), INDATUMA, age_cutoff_date),
+        age_cutoff_date,
+        na.rm = TRUE
+      )
+    ),
+
+    # Age at exit in years
+    exit_age = lubridate::time_length(exit_date - child_dob, "years"),
+    # Event indicator: T1D occurred before age cutoff
+    event = ifelse(!is.na(INDATUMA) & INDATUMA <= age_cutoff_date, 1, 0)
+  )
+
+  data2use <- data2use %>%
+  dplyr::mutate(exit_age = exit_age - age_cutoff_lower_limit) %>%
+  dplyr::filter(exit_age > 0)
+
+  return(data2use)
+
+}
+```
+
+
+read/load vitamin_d_case_control_plus_abis for analysis
+```{r}
+vitamin_d_case_control_plus_abis <- read.table(paste0(data_root, "/vitamin_d/vitamin_d_case_control_plus_abis.csv"))
+```
+
+
+```{r}
+vitamin_d_case_control_plus_abis <- vitamin_d_case_control_plus_abis %>%
+  dplyr::mutate(
+    child_dob = lubridate::as_date(child_dob),
+    INDATUMA = lubridate::as_date(INDATUMA),
+  )
+
+for(c in names(vitamin_d_case_control_plus_abis)){
+  curr_class <- class(vitamin_d_case_control_plus_abis[[c]])
+  if(curr_class != "Date" & curr_class == "character"){
+    vitamin_d_case_control_plus_abis[[c]] <- factor(vitamin_d_case_control_plus_abis[[c]])
+  }
+}
+```
+
+reorder factors
+```{r}
+vitamin_d_case_control_plus_abis$T1D_heredity_cat <- factor(
+  vitamin_d_case_control_plus_abis$First_degree_T1D_heredity_cat,
+  levels = c("No", "Yes")
+)
+
+vitamin_d_case_control_plus_abis$Smoking_during_pregnancy <- factor(
+  vitamin_d_case_control_plus_abis$Smoking_during_pregnancy,
+  levels = c("No", "Yes")
+)
+
+vitamin_d_case_control_plus_abis$Parity <- factor(
+  vitamin_d_case_control_plus_abis$Parity,
+  levels = c("First parity", "Previous parity")
+)
+
+vitamin_d_case_control_plus_abis$Preterm_dichotomous <- factor(
+  vitamin_d_case_control_plus_abis$Preterm_dichotomous,
+  levels = c("Normal", "Preterm")
+)
+
+vitamin_d_case_control_plus_abis$Season <- factor(
+  vitamin_d_case_control_plus_abis$Season,
+  levels = c("Autumn", "Spring", "Summer", "Winter")
+)
+
+vitamin_d_case_control_plus_abis$Sex_cat <- factor(
+  vitamin_d_case_control_plus_abis$Sex_cat,
+  levels = c("Boy", "Girl")
+)
+
+vitamin_d_case_control_plus_abis$Fish_any_pregnancy <- factor(
+  vitamin_d_case_control_plus_abis$Fish_any_pregnancy,
+  levels = c("Seldom", "1–2 times week or more"))
+
+vitamin_d_case_control_plus_abis <- vitamin_d_case_control_plus_abis %>%
+  dplyr::mutate(
+    Delivery_mode = ifelse(
+      is.na(Delivery_mode),
+      NA_character_,
+      ifelse(
+        grepl("caesar", Delivery_mode, ignore.case = TRUE),
+        "Caesarean",
+        "Vaginal"
+      )
+    ),
+    Delivery_mode = factor(Delivery_mode, levels = c("Vaginal", "Caesarean"))
+  )
+```
+
+
+```{r}
+qs_birth_weight <- round(
+  quantile(
+    vitamin_d_case_control_plus_abis$Birth_weight, 
+    probs = seq(0, 1, 0.25), 
+    na.rm = TRUE)
+  ,
+  2)
+
+vitamin_d_case_control_plus_abis <- vitamin_d_case_control_plus_abis %>%
+    dplyr::mutate(
+        Birth_weight_cat = cut(
+            Birth_weight,
+            breaks = qs_birth_weight,
+            include.lowest = TRUE,
+            labels = c(
+                paste0("≤", qs_birth_weight[2]),                                    
+                paste0(qs_birth_weight[2], "–", qs_birth_weight[3]),                        
+                paste0(qs_birth_weight[3], "–", qs_birth_weight[4]),                           
+                paste0(">", qs_birth_weight[4])                                     
+            )
+        )
+    )
+
+
+```
+
+
+Weighted Cox analysis
+
+conducting a time-to-event Cox regression with:
+
+ - Time scale: Age (from birth)
+
+ - Exposure: Fixed (cord blood ferritin)
+
+ - Follow-up ends: December 31, 2020
+
+Outcome: T1D diagnosis
+```{r event_time, warning=FALSE}
+vitamin_d_case_control_plus_abis$start_age <- 0  # since follow-up starts at birth
+
+vitamin_d_case_control_plus_abis$INDATUMA <- as.Date(vitamin_d_case_control_plus_abis$INDATUMA, format = "%Y-%m-%d")
+```
+
+```{r cox_data, warning=FALSE}
+df_cox_full <- vitamin_d_case_control_plus_abis
+```
+
+```{r}
+child_covariates <- c("Preterm_dichotomous","Birth_weight_cat", "Season", "Sex_cat")
+
+maternal_covariates <- c(
+  "T1D_heredity_cat",
+  "Smoking_during_pregnancy",
+  "Fish_any_pregnancy",
+  "Parity",
+  "Delivery_mode",
+  "Vitamin_mineral_supplement_pregnancy"
+)
+```
+
+```{r remove_missing_rows}
+df_cox_full <- df_cox_full %>%
+  dplyr::select(all_of(
+    c(
+      "ABISnr",
+      "diagnosis",
+      "conc_25OHD",
+      "DBP",
+      child_covariates,
+      maternal_covariates,
+      "INDATUMA"
+    )
+  )) %>%
+  dplyr::mutate(ABISnr = as.character(ABISnr)) %>%
+  dplyr::left_join(
+    abis %>% dplyr::select(ABISnr,child_dob),
+    by = "ABISnr"
+  ) %>%
+  dplyr::mutate(conc_25OHD = conc_25OHD/10.0)
+```
+
+
+
+# =========================================================
+# DEFINE WINDOWS
+# =========================================================
+```{r}
+window_definitions <- tibble::tribble(
+  ~window_name, ~lower, ~upper, ~admin_end,
+
+  "  0-5 years",   0,  5,  NA,
+  " 5-10 years",  5, 10,  NA,
+  "10-15 years", 10, 15,  NA,
+  "  15+ years",  15, NA, "2020-12-31",
+  " 0-12 years", 0, 12,  NA,
+  "  12+ years",  12, NA, "2020-12-31"
+  )
+```
+
+```{r}
+# =========================================================
+# MAIN FIRTH PENALIZED COX FUNCTION
+# (Weights dropped - see methods for justification)
+# =========================================================
+# run_window_analysis <- function(
+#     full_df,
+#     subset_df,
+#     exposure,
+#     covars,
+#     window_name,
+#     lower,
+#     upper = NULL,
+#     admin_end = NULL
+# ){
+# 
+#   # ---------------------------------------------
+#   # CREATE WINDOWED DATASETS
+#   # ---------------------------------------------
+#   full_window <- event_time_formulation(
+#     data2use = full_df,
+#     age_cutoff = upper,
+#     age_cutoff_lower_limit = lower,
+#     age_cutoff_date = admin_end
+#   )
+#   subset_window <- event_time_formulation(
+#     data2use = subset_df,
+#     age_cutoff = upper,
+#     age_cutoff_lower_limit = lower,
+#     age_cutoff_date = admin_end
+#   )
+#   # ---------------------------------------------
+#   # WINDOW-SPECIFIC SAMPLING FRACTIONS
+#   # (Retained for descriptive reporting)
+#   # ---------------------------------------------
+#   n_cases <-
+#     sum(subset_window$event == 1, na.rm = TRUE)
+# 
+#   n_censored <-
+#     sum(
+#       subset_window$event == 0 &
+#         subset_window$exit_date < subset_window$age_cutoff_date,
+#       na.rm = TRUE
+#     )
+# 
+#   n_full_cases    <- sum(full_window$event == 1, na.rm = TRUE)
+#   n_full_controls <- sum(full_window$event == 0, na.rm = TRUE)
+#   n_subset_cases    <- sum(subset_window$event == 1, na.rm = TRUE)
+#   n_subset_controls <- sum(subset_window$event == 0, na.rm = TRUE)
+# 
+#   f_cases    <- n_subset_cases    / n_full_cases
+#   f_controls <- n_subset_controls / n_full_controls
+# 
+#   # ---------------------------------------------
+#   # MODEL FORMULA
+#   # ---------------------------------------------
+#   formula_txt <- paste0(
+#     "Surv(exit_age, event) ~ ",
+#     exposure,
+#     " + ",
+#     paste(covars, collapse = " + ")
+#   )
+#   formula_obj <- as.formula(formula_txt)
+# 
+#   # ---------------------------------------------
+#   # FIT FIRTH PENALIZED COX MODEL
+#   # coxphf does not support weights;
+#   # weighting scheme dropped - see methods
+#   # ---------------------------------------------
+#   model_vars <- c("exit_age", "event", exposure, covars)
+# 
+#   subset_window_complete <- subset_window %>%
+#     tidyr::drop_na(dplyr::all_of(model_vars))
+# 
+#   n_dropped <- nrow(subset_window) - nrow(subset_window_complete)
+#   if (n_dropped > 0) {
+#     warning(paste0(
+#       "[", window_name, "] ", n_dropped,
+#       " row(s) dropped due to missing values before coxphf fit."
+#     ))
+#   }
+# 
+#   fit <- coxphf::coxphf(
+#     formula = formula_obj,
+#     data    = subset_window_complete
+#   )
+# 
+#   subset_window <- subset_window_complete
+#   # ---------------------------------------------
+#   # EXTRACT RESULTS VIA summary()
+#   # broom::tidy() does not correctly parse
+#   # coxphf objects - use summary() directly
+#   # ---------------------------------------------
+#   s <- summary(fit)
+#   # Locate the row corresponding to the exposure term
+#   coef_names <- names(s$coefficients)           # named numeric vector
+#   exposure_idx <- which(coef_names == exposure)
+# 
+#   if (length(exposure_idx) == 0) {
+#     stop(paste("Exposure term '", exposure, "' not found in model output.", sep = ""))
+#   }
+# 
+#   res <- tibble::tibble(
+#     term      = exposure,
+#     estimate  = exp(s$coefficients[exposure_idx]),  # already exponentiated
+#     conf.low  = s$ci.lower[exposure_idx],               # already on HR scale
+#     conf.high = s$ci.upper[exposure_idx],               # already on HR scale
+#     p.value   = s$prob[exposure_idx],                   # Firth p-value
+#     window    = window_name,
+#     N                = nrow(subset_window),
+#     Cases            = n_cases,
+#     Censored         = n_censored,
+#     PY               = sum(subset_window$exit_age),
+#     Full_cases       = n_full_cases,
+#     Full_controls    = n_full_controls,
+#     Sampled_cases    = n_subset_cases,
+#     Sampled_controls = n_subset_controls,
+#     f_cases          = f_cases,
+#     f_controls       = f_controls
+#   )
+# 
+#   return(res)
+# }
+```
+
+# =========================================================
+# MAIN COX FUNCTION
+# =========================================================
+```{r}
+run_window_analysis <- function(
+    full_df,
+    subset_df,
+    exposure,
+    covars,
+    window_name,
+    lower,
+    upper = NULL,
+    admin_end = NULL
+){
+
+
+  # ---------------------------------------------
+  # CREATE WINDOWED DATASETS
+  # ---------------------------------------------
+
+  full_window <- event_time_formulation(
+    data2use = full_df,
+    age_cutoff = upper,
+    age_cutoff_lower_limit = lower,
+    age_cutoff_date = admin_end
+  )
+
+  subset_window <- event_time_formulation(
+    data2use = subset_df,
+    age_cutoff = upper,
+    age_cutoff_lower_limit = lower,
+    age_cutoff_date = admin_end
+  )
+
+  # ---------------------------------------------
+  # WINDOW-SPECIFIC SAMPLING FRACTIONS
+  # IMPORTANT
+  # ---------------------------------------------
+  n_cases <-
+    sum(subset_window$event == 1, na.rm = TRUE)
+
+  n_censored <-
+    sum(
+      subset_window$event == 0 &
+      subset_window$exit_date < subset_window$age_cutoff_date,
+      na.rm = TRUE
+    )
+
+
+  n_full_cases <-
+    sum(full_window$event == 1, na.rm = TRUE)
+
+  n_full_controls <-
+    sum(full_window$event == 0, na.rm = TRUE)
+
+  n_subset_cases <-
+    sum(subset_window$event == 1, na.rm = TRUE)
+
+  n_subset_controls <-
+    sum(subset_window$event == 0, na.rm = TRUE)
+
+
+  f_cases <- n_subset_cases / n_full_cases
+  f_controls <- n_subset_controls / n_full_controls
+
+  # ---------------------------------------------
+  # DEFINE WEIGHTS
+  # ---------------------------------------------
+
+  subset_window <- subset_window %>%
+    dplyr::mutate(
+      ipw =
+        ifelse(
+          event == 1,
+          1 / f_cases,
+          1 / f_controls
+        )
+    )
+
+  # ---------------------------------------------
+  # MODEL FORMULA
+  # ---------------------------------------------
+
+  formula_txt <- paste0(
+    "Surv(exit_age, event) ~ ",
+    exposure,
+    " + ",
+    paste(covars, collapse = " + ")
+  )
+
+  formula_obj <- as.formula(formula_txt)
+
+  # print(format(formula_obj))
+  # ---------------------------------------------
+  # FIT MODEL
+  # ---------------------------------------------
+
+  # fit <- coxph(
+  #   formula_obj,
+  #   data = subset_window,
+  #   weights = ipw,
+  #   robust = TRUE
+  # )
+
+    # 1. Create a variable to store the note
+  convergence_note <- NA_character_
+  
+  # 2. Run the model inside withCallingHandlers
+  fit <- withCallingHandlers(
+          coxph(
+          formula_obj,
+          data = subset_window,
+          weights = ipw,
+          robust = TRUE
+        ),
+    
+        warning = function(w) {
+          if (grepl("Loglik converged before variable", w$message)) {
+            convergence_note <<- "convergence problem"
+          }
+          invokeRestart("muffleWarning") 
+        }
+  )
+  
+
+  # ---------------------------------------------
+  # EXTRACT RESULTS
+  # ---------------------------------------------
+
+  res <- broom::tidy(
+    fit,
+    exponentiate = TRUE,
+    conf.int = TRUE
+  ) %>%
+    dplyr::filter(term == exposure) %>%
+    dplyr::mutate(
+
+      window = window_name,
+
+      N = nrow(subset_window),
+
+      Cases = n_cases,
+      Censored = n_censored,
+      PY = sum(subset_window$exit_age),
+
+
+      Full_cases = n_full_cases,
+      Full_controls = n_full_controls,
+
+      Sampled_cases = n_subset_cases,
+      Sampled_controls = n_subset_controls,
+
+      f_cases = f_cases,
+      f_controls = f_controls,
+      
+      Note = convergence_note
+    )
+
+  return(res)
+}
+```
+
+
+# =========================================================
+# DEFINE EXPOSURES
+# =========================================================
+```{r}
+exposures <- c(
+      "conc_25OHD",
+      "DBP"
+)
+```
+
+
+# =========================================================
+# DEFINE COVARIATES
+# =========================================================
+```{r}
+base_covars <- c(
+  "T1D_heredity_cat",
+  "Smoking_during_pregnancy",
+  "Fish_any_pregnancy",
+  "Parity",
+  "Delivery_mode",
+  "Vitamin_mineral_supplement_pregnancy",
+  "Preterm_dichotomous",
+  "Birth_weight_cat", 
+  "Season", 
+  "Sex_cat"
+)
+```
+
+
+# =========================================================
+# RUN ALL WINDOW ANALYSES
+# =========================================================
+```{r}
+all_results <- purrr::cross2(
+  exposures,
+  seq_len(nrow(window_definitions))
+) %>%
+
+  purrr::map_df(function(x){
+
+    exposure_i <- x[[1]]
+
+    window_i <- window_definitions[x[[2]], ]
+
+    run_window_analysis(
+
+      full_df = abis,
+
+      subset_df = df_cox_full,
+
+      exposure = exposure_i,
+
+      covars = base_covars,
+
+      window_name = window_i$window_name,
+
+      lower = window_i$lower,
+
+      upper = window_i$upper,
+
+      admin_end = window_i$admin_end
+    )
+
+  })
+
+
+```
+
+# =========================================================
+# FINAL TABLE
+# =========================================================
+```{r}
+results_table <- all_results %>%
+
+  dplyr::mutate(
+
+    HR_CI =
+      sprintf(
+        "%.2f (%.2f–%.2f)",
+        estimate,
+        conf.low,
+        conf.high
+      ),
+    f_cases = round(f_cases,3),
+    f_controls = round(f_controls,3),
+    
+    p.value =
+      format.pval(
+        p.value,
+        digits = 2,
+        eps = 0.001
+      )
+  ) %>%
+
+  dplyr::select(
+    Exposure = term,
+    Window = window,
+    N,
+    Cases,
+    HR_CI,
+    p.value,
+    f_cases,
+    f_controls,
+    Censored,
+    PY,
+    Note
+  )
+
+
+```
+
+# =========================================================
+# OPTIONAL WIDE FORMAT TABLE
+# =========================================================
+```{r}
+results_wide <- results_table %>%
+  dplyr::select(
+    Exposure,
+    Window,
+    HR_CI
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = Window,
+    values_from = HR_CI
+  )
+
+```
+
+
+# =========================================================
+# VIEW RESULTS
+# =========================================================
+```{r}
+# print(results_table)
+# print(results_wide)
+```
+rearrange results remove duplicate row
+```{r}
+results_table_reformat <- results_table %>%
+  dplyr::select(-Censored)%>%
+  dplyr::arrange(Exposure,Window) %>%
+  dplyr::mutate(
+    Exposure = case_when(
+      Exposure == "conc_25OHD" ~ "conc 25OHD",
+      TRUE ~ Exposure)
+  )
+
+results_table_reformat$Exposure <- factor(
+  results_table_reformat$Exposure,
+  levels = c(
+      "conc 25OHD",
+      "DBP"
+    )
+)
+
+results_table_reformat$Window <- factor(
+  results_table_reformat$Window,
+  levels = c(
+    "  0-5 years",
+    " 5-10 years",
+    "10-15 years",
+    "  15+ years",
+    " 0-12 years",
+    "  12+ years"
+    )
+)
+
+results_table_reformat <- results_table_reformat %>% 
+  dplyr::arrange(Exposure,Window)
+
+df_clean <- results_table_reformat %>%
+  dplyr::filter(row_number() == 1 | if_any(everything(), ~ .x != lag(.x)))
+```
+
+```{r}
+saveRDS(df_clean, file.path(output_dir,"landmark_results_case_control_sampling_frac_cox.RDS"))
+```
+
+```{r}
+chronological_df <- df_clean %>% 
+  dplyr::filter(!(Window %in% c(" 0-12 years", "  12+ years")))
+
+chronological_df_header <- data.frame(
+    Exposure = "Chronological",
+    Window = as.factor(NA_character_),
+    N = NA_integer_,
+    Cases = NA_integer_,
+    HR_CI = NA_character_,
+    p.value =NA_character_,
+    f_cases = NA_real_,
+    f_controls = NA_real_,
+    PY = NA_real_,
+    Note = NA_character_
+    )
+
+puberty_split_df <- df_clean %>% 
+  dplyr::filter(Window %in% c(" 0-12 years", "  12+ years"))
+
+puberty_split_df_header <- data.frame(
+    Exposure = "Puberty-Category",
+    Window = as.factor(NA_character_),
+    N = NA_integer_,
+    Cases = NA_integer_,
+    HR_CI = NA_character_,
+    p.value =NA_character_,
+    f_cases = NA_real_,
+    f_controls = NA_real_,
+    PY = NA_real_,
+    Note = NA_character_
+    )
+```
+
+
+flextable
+```{r}
+results_table_flex <- bind_rows(
+  chronological_df_header,
+  chronological_df,
+  puberty_split_df_header,
+  puberty_split_df
+) %>%
+  dplyr::mutate(
+    Exposure = if_else(
+      row_number() != 1 &
+        (!is.na(lag(Exposure, 1)) &
+           Exposure == lag(Exposure, 1)),
+      NA_character_,
+      Exposure
+    ),
+    Window = if_else(
+      row_number() != 1 &
+        (!is.na(lag(Window, 1)) &
+           Window == lag(Window, 1)),
+      NA_character_,
+      Window
+    )
+  ) %>%
+  dplyr::rename(
+    `HR (95% CI)` = HR_CI,
+    `P-value` = p.value,
+    `f (cases)` = f_cases,
+    `f (controls)` = f_controls
+    ) %>%
+  dplyr::mutate(
+    Window = dplyr::case_when(
+      grepl("problem", Note, ignore.case = TRUE) ~ paste0(Window,"\U2021"),
+      TRUE ~ Window
+    )
+  ) %>%
+  dplyr::select(-Note) %>%
+  flextable() %>%
+  flextable::add_footer_lines(
+    values = c(
+      "\U2021 Converge Problem"
+    )
+  ) %>%
+  flextable::autofit() %>%
+  flextable::align(j = 2, align = "right", part = "body")
+```
+
+
+```{r save_merged_all_model_results}
+flextable::save_as_docx(
+  `Weighted Cox model: landmark analysis` = results_table_flex,
+  path = paste0(output_dir,"/flex_merged_all_weighted_cox_results_landmark_analysis.docx"),
+  pr_section = sect_properties
+)
+
+
+saveRDS(
+  object = results_table_flex,
+  file = paste0(output_dir,"/flex_merged_all_weighted_cox_results_landmark_analysis.docx.RDS")
+)
+```
+
+
+

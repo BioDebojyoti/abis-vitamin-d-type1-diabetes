@@ -1,0 +1,371 @@
+---
+title: "ABIS info for Weighted Cox Proportional Hazards model: conc. 25(OH)D & DBP"
+author: "Debojyoti Das"
+date: "2026-06-01"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+rm(list = ls())
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+load libraries
+```{r load_libraries, message=FALSE, warning=FALSE}
+pacman::p_load(
+  haven,        
+  zoo,
+  sjlabelled,
+  janitor,       
+  data.table,   
+  ggplot2,
+  comprehenr,  
+  stringr,     
+  rstatix,
+  dplyr,
+  tidyr,
+  forcats,
+  officer,
+  cowplot,
+  ggExtra,
+  ggpubr,
+  GGally,
+  janitor,
+  ggrepel,
+  ggtext,
+  parameters,
+  lme4,
+  broom,
+  pscl,
+  tibble,
+  knitr,
+  ggeffects,
+  cobalt,
+  WeightIt,
+  marginaleffects,
+  survival
+  )
+```
+
+define paths
+```{r define_paths, eval=TRUE}
+data_root <- "/Users/debda22/Projects/abis-data"
+proj_root <- "/Users/debda22/Projects/abis-vitamin-d-type1-diabetes"
+```
+
+load parameters
+```{r}
+source(paste0(proj_root,"/rscripts/all_parameters_case_control_T1D_vitamin_D.R"))
+source(paste0(proj_root,"/rscripts/weighted_cox_T1D_helper.R"))
+```
+
+
+```{r readferritinD_data, message=FALSE, warning=FALSE }
+vitamin_d_case_control_plus_abis <- read.table(paste0(data_root, "/vitamin_d/vitamin_d_case_control_plus_abis.csv"))
+```
+
+
+Read cohort data from SAV format file
+```{r read_abis_data}
+abis <- haven::read_sav(paste0(data_root, "/Updated registries/ABIS_Database_Updated_240124.sav"))
+```
+
+```{r}
+abis <- abis %>%
+  dplyr::mutate(
+    ABISnr = as.character(ABISnr), 
+    child_dob = lubridate::ym(barn_år_mån)
+  ) %>%
+  dplyr::mutate(
+    month_num = lubridate::month(child_dob),
+    Season = dplyr::case_when(
+      month_num %in% c(12, 1, 2)  ~ "Winter",
+      month_num %in% c(3, 4, 5)   ~ "Spring",
+      month_num %in% c(6, 7, 8)   ~ "Summer",
+      month_num %in% c(9, 10, 11) ~ "Autumn"
+   )
+  ) %>%
+  dplyr::select(-all_of(c("barn_år_mån", "month_num")))
+
+print("number of participants with DOB:")
+print(abis %>% nrow())
+print("number of participants in birth questionnaire:")
+print(abis %>% count(par_b))
+```
+
+T1D diagnosis
+```{r}
+df_T1D <- readxl::read_xlsx(
+  paste0(
+    data_root,
+    "/T1D_DIAGNOSIS_20240305/T1D ABISnr updated 20240305 including removed.xlsx"
+  )
+)
+```
+
+```{r}
+df_T1D <- df_T1D %>% 
+    dplyr::mutate(
+    ABISnr = as.character(ABISnr), 
+    INDATUMA = lubridate::ymd(INDATUMA)
+  )
+```
+
+```{r}
+abis <- abis %>%
+  dplyr::left_join(
+    df_T1D,
+    by = "ABISnr"
+  ) %>%
+  dplyr::mutate(
+    T1D_case_20201231 = ifelse(
+      ABISnr %in% df_T1D$ABISnr, "T1D", "Healthy")
+    )
+```
+
+```{r}
+# Set exit date based on whether T1D occurred before 2020-12-31
+abis$exit_date <- as.Date(ifelse(
+  !is.na(abis$INDATUMA) & abis$INDATUMA <= as.Date("2020-12-31"),
+  abis$INDATUMA,
+  as.Date("2020-12-31")
+))
+
+# Calculate age at exit in years
+abis$exit_age <- as.numeric(
+  difftime(
+    abis$exit_date,
+    abis$child_dob,
+    units = "days"
+  )
+) / 365.25
+
+abis$event <- ifelse(!is.na(abis$INDATUMA) & abis$INDATUMA <= as.Date("2020-12-31"),1,0)
+```
+
+
+Variable names and labels
+```{r extract_abis_colname_description}
+column_names <- names(abis)
+label <- to_vec(
+  for (i in seq_along(column_names))
+    if (
+      (!is.null(
+        attr(abis[[column_names[i]]], "label")
+        )
+       )&(
+         length(attr(abis[[column_names[i]]], "label")) == 1)
+      ) attr(abis[[column_names[i]]], "label")
+  else column_names[i])
+
+abis_info <- data.frame(
+  name = column_names,
+  label = label
+)
+```
+
+<!-- dob: birth -->
+<!-- ```{r add_season_of_birth} -->
+<!-- abis <- abis %>% -->
+<!--   dplyr::mutate( -->
+<!--     child_dob = as.Date( -->
+<!--       as.yearmon(as.character(barn_år_mån), format = "%Y%m") -->
+<!--       ) -->
+<!--     ) %>% -->
+<!--   dplyr::select(-all_of(c("barn_år_mån"))) -->
+<!-- ``` -->
+
+<!-- composite_T1D_heredity = fr_15f_1 mother with T1D -->
+<!-- composite_T1D_heredity = pmax(
+    fr_15f_1, fr_15f_2, fr_15f_3, fr_15f_4, na.rm = TRUE)
+    ) 
+mother/ father/ sibling / grandparents -->
+
+```{r add_T1D_heredity}
+abis <- abis %>% 
+  dplyr::mutate(across(c(fr_15f_1, fr_15f_2, fr_15f_3, fr_15f_4), ~ as.numeric(.))) %>%
+  dplyr::mutate(
+    composite_T1D_heredity = pmax(fr_15f_1, fr_15f_2, fr_15f_3, fr_15f_4, na.rm = TRUE)
+    ) %>%
+  dplyr::mutate(
+    T1D_heredity = ifelse(!is.na(composite_T1D_heredity),composite_T1D_heredity,NA_integer_)
+  ) 
+```
+
+
+<!---
+  # fr_15f_1,   # Inheritance, T1D mom
+  # fr_15f_2,   # Inheritance, T1D dad
+  # fr_15f_3,   # Inheritance, T1D siblings
+  # fr_15f_4,   # Inheritance, T1D grandparents
+--->  
+```{r select_columns_of_interest}
+abis <- abis %>% dplyr::select(
+  ABISnr,
+  child_dob,
+  T1D_heredity,
+  # fr_15f_1, # Inheritance, T1D mom
+  # fr_15f_2, # Inheritance, T1D dad
+  # fr_15f_3, # Inheritance, T1D siblings
+  fr_18,    # Did you smoke during your pregnancy
+  # fr_18a,  # If yes, how many cigarettes per day?
+  parity,  # 0 = "first parity", 1 = "previous parity"
+  fr_81,   # Did you use any vitamins or mineral supplement during your pregnancy?
+  fr_91,   # How often did you eat lake fish?
+  fr_92,   # How often did you eat Baltic fish ?
+  fr_93,   # How often did you eat other fish?
+  # fr_92_93_sum_recoded,  # mother during pregnancy: index of long chain omega3 intake based on fish intake
+  fr_12,   # Week of delivery
+  fr_13,   # The way of delivery
+  fr_14,   # birth weight
+  fr_14a,  # birth length
+  Season,
+  Gender,
+  par_b,
+  INDATUMA,              
+  exit_age,
+  event,       
+  T1D_case_20201231
+) %>%
+  dplyr::mutate(across(c(fr_91, fr_92, fr_93), ~ as.numeric(.))) %>%
+  dplyr::mutate(
+    fish_intake_frequency = pmin(
+      fr_91, 
+      fr_92, 
+      fr_93, 
+      na.rm = TRUE)
+  )
+```
+
+access helper functions
+```{r load_helper_function}
+source(file.path(proj_root,"rscripts","case_control_T1D_vitamin_D_helper.R"))
+```
+
+load factor labels
+```{r load_factor_labels}
+source(file.path(proj_root,"rscripts","all_parameters_case_control_T1D_vitamin_D.R"))
+```
+
+remove vitamin supplement "Do not know"
+```{r}
+abis <- abis %>%
+  dplyr::mutate(
+    fr_81 = ifelse(
+      is.na(fr_81) | fr_81 == 3,
+      NA,
+      fr_81)
+  )
+```
+
+
+```{r categorise_variables_with_proper_labels}
+for (cv in unlist(all_parameters$category_variable)){
+  
+  curr_parameters <- all_parameters[all_parameters$category_variable == cv,]
+  abis <- categorise_variable(abis,
+                          variable2categorise = curr_parameters$variable2categorise[[1]],
+                          category_variable = curr_parameters$category_variable[[1]],
+                          breaks = curr_parameters$breaks[[1]],
+                          labels = curr_parameters$labels[[1]]
+)
+  abis[[cv]] <- droplevels(abis[[cv]])
+}
+```
+
+reorder some factors
+```{r reorder_some_factors1}
+abis$Fish_lake_pregnancy <- factor(
+  abis$Fish_lake_pregnancy,
+  levels = rev(c("Every day", "3\u20135 times/week", "1\u20132 times week", "Seldom")))
+
+abis$Fish_Baltic_pregnancy <- factor(
+  abis$Fish_Baltic_pregnancy,
+  levels = rev(c("Every day", "3\u20135 times/week", "1\u20132 times week", "Seldom")))
+
+abis$Fish_other_pregnancy <- factor(
+  abis$Fish_other_pregnancy,
+  levels = rev(c("Every day", "3\u20135 times/week", "1\u20132 times week", "Seldom")))
+
+abis$Fish_any_pregnancy <- factor(
+  abis$Fish_any_pregnancy,
+  levels = rev(c("Every day", "3\u20135 times/week", "1\u20132 times week", "Seldom")))
+```
+
+```{r reorder_some_factors2}
+abis$Fish_lake_pregnancy <- forcats::fct_collapse(
+  abis$Fish_lake_pregnancy,
+  "1–2 times week or more" = c("Every day", "3–5 times/week", "1–2 times week")
+)
+
+abis$Fish_Baltic_pregnancy <- forcats::fct_collapse(
+  abis$Fish_Baltic_pregnancy,
+  "1–2 times week or more" = c("Every day", "3–5 times/week", "1–2 times week")
+)
+
+abis$Fish_other_pregnancy <- forcats::fct_collapse(
+  abis$Fish_other_pregnancy,
+  "1–2 times week or more" = c("Every day", "3–5 times/week", "1–2 times week")
+)
+
+abis$Fish_any_pregnancy <- forcats::fct_collapse(
+  abis$Fish_any_pregnancy,
+  "1–2 times week or more" = c("Every day", "3–5 times/week", "1–2 times week")
+)
+```
+
+
+```{r rename_columns}
+abis["Gestational_age"] <- abis$fr_12 
+abis["Birth_weight"] <- abis$fr_14 
+abis["Birth_length"] <- abis$fr_14a 
+```
+
+```{r select_renamed_columns}
+abis <- abis %>% dplyr::select(all_of(
+  c(
+    "ABISnr",
+    "child_dob",
+    "T1D_heredity_cat",
+    "Preterm_group",
+    "Preterm_dichotomous",
+    "Delivery_mode",
+    "Gestational_age",
+    "Birth_weight",
+    "Birth_length",
+    "Season",
+    "Parity",
+    "Smoking_during_pregnancy",
+    "Vitamin_mineral_supplement_pregnancy",
+    "Fish_lake_pregnancy",
+    "Fish_Baltic_pregnancy",
+    "Fish_other_pregnancy",
+    "Fish_any_pregnancy",
+    "Sex_cat",
+    "par_b",
+    "INDATUMA",              
+    "exit_age",
+    "event"
+  )
+))
+
+abis <- as.data.frame(abis)
+```
+
+```{r remove_attributes_to_preserve_data_frame_class, echo=FALSE}
+for(col in names(abis)){
+  for(atr in c("label","format.spss","display_width","labels")){
+    if(!is.null(attr(abis[[col]], atr))){
+      attr(abis[[col]], atr) <- NULL
+     }
+  }
+}
+```
+
+
+```{r}
+saveRDS(abis, "/Users/debda22/Projects/abis-data/vitamin_d/covariates.abis.full.cohort.RDS")
+```
+

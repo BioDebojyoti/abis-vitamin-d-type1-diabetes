@@ -1,0 +1,696 @@
+---
+title: "Weighted Cox model: vitD"
+author: "Debojyoti Das"
+date: "2026-06-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list = ls())
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+set output directory
+```{r output_dir, message=FALSE, warning=FALSE}
+output_dir <- "/Users/debda22/Projects/abis-vitamin-d-type1-diabetes/results/revision/case_and_control_weighted_cox/full"
+
+if(!dir.exists(output_dir)){
+  dir.create(output_dir, recursive = TRUE)
+} else {
+  cat(paste0(output_dir," is already present!!\n"))
+}
+```
+
+load libraries
+```{r load_libraries, message=FALSE, warning=FALSE}
+pacman::p_load(
+  multipleNCC,
+  haven,        
+  zoo,
+  sjlabelled,
+  janitor,       
+  data.table,   
+  ggplot2,
+  comprehenr,  
+  stringr,     
+  rstatix,
+  dplyr,
+  tidyr,
+  forcats,
+  officer,
+  cowplot,
+  ggExtra,
+  ggpubr,
+  GGally,
+  janitor,
+  ggrepel,
+  ggtext,
+  parameters,
+  lme4,
+  broom,
+  pscl,
+  tibble,
+  knitr,
+  ggeffects,
+  cobalt,
+  WeightIt,
+  marginaleffects,
+  survival,
+  survminer,
+  splines,
+  purrr,
+  nnet,
+  magick,
+  patchwork,
+  flextable
+  )
+```
+
+
+```{r word_sect_properties}
+sect_properties <- prop_section(
+  page_size = page_size(
+    orient = "landscape",
+    height = 11.7,
+    width = 8.3
+  ),
+  page_margins = page_mar(
+    top = 0.5,
+    bottom = 0.5,
+    left = 0.5,
+    right = 0.5,
+    header = 0.3,
+    footer = 0.3,
+    gutter = 0
+  ),
+  type = "continuous"
+)
+
+set_flextable_defaults(
+    padding.top = 0, 
+    padding.bottom = 0,
+    line_spacing = 1
+)
+```
+
+
+define paths
+```{r define_paths, eval=TRUE}
+data_root <- "/Users/debda22/Projects/abis-data"
+proj_root <- "/Users/debda22/Projects/abis-vitamin-d-type1-diabetes/"
+```
+
+load parameters and helper functions
+```{r}
+source(paste0(proj_root,"/rscripts/all_parameters_case_control_T1D_vitamin_D.R"))
+source(paste0(proj_root,"/rscripts/weighted_cox_T1D_helper.R"))
+```
+
+```{r}
+abis <- readRDS(file.path(data_root,"vitamin_d","covariates.abis.full.cohort.RDS"))
+```
+
+```{r}
+print("ABIS count:")
+print(abis %>% count(par_b))
+```
+
+
+```{r}
+print("abis cohort")
+print(abis %>% dplyr::count(event))
+
+abis <- abis %>%
+  dplyr::mutate(has_dob = ifelse(!is.na(child_dob),1,0)) %>%
+  dplyr::filter(has_dob == 1)
+
+print("abis cohort with birth questionnaire")
+print(abis %>% dplyr::filter(!is.na(child_dob)) %>% dplyr::count(event))
+```
+
+
+
+```{r}
+print("ABIS - T1D count with birth questionnaire:")
+print(abis %>% count(par_b, event))
+```
+
+
+read/load vitamin_d_case_control_plus_abis for analysis
+```{r}
+vitamin_d_case_control_plus_abis <- read.table(paste0(data_root, "/vitamin_d/vitamin_d_case_control_plus_abis.csv"))
+```
+
+reorder factors
+```{r}
+vitamin_d_case_control_plus_abis$T1D_heredity_cat <- factor(
+  vitamin_d_case_control_plus_abis$First_degree_T1D_heredity_cat,
+  levels = c("No", "Yes")
+)
+
+vitamin_d_case_control_plus_abis$Smoking_during_pregnancy <- factor(
+  vitamin_d_case_control_plus_abis$Smoking_during_pregnancy,
+  levels = c("No", "Yes")
+)
+
+vitamin_d_case_control_plus_abis$Parity <- factor(
+  vitamin_d_case_control_plus_abis$Parity,
+  levels = c("First parity", "Previous parity")
+)
+
+vitamin_d_case_control_plus_abis$Preterm_dichotomous <- factor(
+  vitamin_d_case_control_plus_abis$Preterm_dichotomous,
+  levels = c("Normal", "Preterm")
+)
+
+vitamin_d_case_control_plus_abis$Season <- factor(
+  vitamin_d_case_control_plus_abis$Season,
+  levels = c("Autumn", "Spring", "Summer", "Winter")
+)
+
+vitamin_d_case_control_plus_abis$Sex_cat <- factor(
+  vitamin_d_case_control_plus_abis$Sex_cat,
+  levels = c("Boy", "Girl")
+)
+
+vitamin_d_case_control_plus_abis$Fish_any_pregnancy <- factor(
+  vitamin_d_case_control_plus_abis$Fish_any_pregnancy,
+  levels = c("Seldom", "1–2 times week or more"))
+
+
+vitamin_d_case_control_plus_abis <- vitamin_d_case_control_plus_abis %>%
+  dplyr::mutate(
+    Delivery_mode = ifelse(
+      is.na(Delivery_mode),
+      NA_character_,
+      ifelse(
+        grepl("caesar", Delivery_mode, ignore.case = TRUE),
+        "Caesarean",
+        "Vaginal"
+      )
+    ),
+    Delivery_mode = factor(Delivery_mode, levels = c("Vaginal", "Caesarean"))
+  )
+
+
+```
+
+
+```{r}
+qs_birth_weight <- round(
+  quantile(
+    vitamin_d_case_control_plus_abis$Birth_weight, 
+    probs = seq(0, 1, 0.25), 
+    na.rm = TRUE)
+  ,
+  2)
+
+vitamin_d_case_control_plus_abis <- vitamin_d_case_control_plus_abis %>%
+    dplyr::mutate(
+        Birth_weight_cat = cut(
+            Birth_weight,
+            breaks = qs_birth_weight,
+            include.lowest = TRUE,
+            labels = c(
+                paste0("≤", qs_birth_weight[2]),                                    
+                paste0(qs_birth_weight[2], "–", qs_birth_weight[3]),                        
+                paste0(qs_birth_weight[3], "–", qs_birth_weight[4]),                           
+                paste0(">", qs_birth_weight[4])                                     
+            )
+        )
+    )
+
+
+```
+
+Outcome: T1D diagnosis
+```{r event_time, warning=FALSE}
+vitamin_d_case_control_plus_abis$start_age <- 0  # since follow-up starts at birth
+
+vitamin_d_case_control_plus_abis$INDATUMA <- as.Date(vitamin_d_case_control_plus_abis$INDATUMA, format = "%Y-%m-%d")
+
+# Set exit date based on whether T1D occurred before 2020-12-31
+vitamin_d_case_control_plus_abis$exit_date <- as.Date(ifelse(
+  !is.na(vitamin_d_case_control_plus_abis$T1D_age_diagnosis) &
+    vitamin_d_case_control_plus_abis$INDATUMA<= as.Date("2020-12-31"),
+  vitamin_d_case_control_plus_abis$INDATUMA,
+  as.Date("2020-12-31")
+))
+```
+
+
+```{r event_time_calculation, warning=FALSE}
+# Calculate age at exit in years
+vitamin_d_case_control_plus_abis$exit_age <- as.numeric(
+  difftime(
+    vitamin_d_case_control_plus_abis$exit_date,
+    vitamin_d_case_control_plus_abis$child_dob,
+    units = "days"
+  )
+) / 365.25
+
+vitamin_d_case_control_plus_abis$event <- ifelse(
+  !is.na(vitamin_d_case_control_plus_abis$INDATUMA) &
+    vitamin_d_case_control_plus_abis$INDATUMA <= as.Date("2020-12-31"),
+  1,
+  0
+)
+```
+
+```{r}
+df_cox_full <- vitamin_d_case_control_plus_abis %>%
+  dplyr::select(all_of(
+    c(
+      "ABISnr",
+      "diagnosis",
+      "DBP",
+      "conc_25OHD",
+      "child_dob",
+      "T1D_heredity_cat",
+      "Smoking_during_pregnancy",
+      "Fish_any_pregnancy",
+      "Parity",
+      "Delivery_mode",
+      "Season",
+      "Sex_cat",
+      "Vitamin_mineral_supplement_pregnancy",
+      "Preterm_dichotomous",
+      "Birth_weight",
+      "Birth_weight_cat",
+      "INDATUMA",
+      "start_age",
+      "exit_date",
+      "exit_age",
+      "event"
+    )
+  ))
+```
+
+
+```{r}
+df_cox_full <- df_cox_full %>%
+  dplyr::mutate(
+    Vitamin_mineral_supplement_pregnancy = ifelse(
+      is.na(Vitamin_mineral_supplement_pregnancy) | Vitamin_mineral_supplement_pregnancy == "Do not know",
+      NA_character_,
+      Vitamin_mineral_supplement_pregnancy)
+  )
+```
+
+Case–control weighted Cox (using time-to-event):
+
+f <- n_subcohort_control / n_full_cohort_control
+f_cases <- n_subcohort_cases / n_full_cohort_cases
+
+Due to financial and practical constraints, cord blood samples were analyzed in 
+a randomly selected subset of cohort participants, including 80 of 160 incident
+cases and 296 of 16,336 non-cases. Because biomarker measurements were available
+only for a stratified random subset defined by outcome status, analyses were 
+performed using inverse probability weighted Cox proportional hazards regression. 
+Sampling probabilities were estimated separately for cases and non-cases, and 
+inverse sampling fractions were used as weights to obtain unbiased hazard ratio 
+estimates representative of the full cohort, following methods for two-phase 
+outcome-dependent sampling described by Samuelsen (1997) and Borgan et al. (2000).
+```{r}
+f <- nrow(df_cox_full %>% dplyr::filter(event==0))/ nrow(abis %>% dplyr::filter(event==0))
+f_cases <- nrow(df_cox_full %>% dplyr::filter(event==1))/ nrow(abis %>% dplyr::filter(event==1))
+```
+
+```{r}
+print("Sampling fractions")
+
+print("controls")
+print(paste0(nrow(df_cox_full %>% dplyr::filter(event==0)),"/",  nrow(abis %>% dplyr::filter(event==0)), " = ",f))
+
+print("cases")
+print(paste0(nrow(df_cox_full %>% dplyr::filter(event==1)),"/",  nrow(abis %>% dplyr::filter(event==1)), " = ",f_cases))
+
+```
+<!-- [1] "Sampling fractions" -->
+<!-- [1] "controls" -->
+<!-- [1] "296/16176 = 0.0182987141444115" -->
+<!-- [1] "cases" -->
+<!-- [1] "83/160 = 0.51" -->
+```{r}
+child_covariates <- c("Preterm_dichotomous","Birth_weight_cat", "Season", "Sex_cat")
+
+maternal_covariates <- c(
+  "T1D_heredity_cat",
+  "Smoking_during_pregnancy",
+  "Fish_any_pregnancy",
+  "Parity",
+  "Delivery_mode",
+  "Vitamin_mineral_supplement_pregnancy"
+)
+```
+
+```{r remove_missing_rows}
+df_cox_full <- df_cox_full %>%
+  dplyr::select(all_of(
+    c(
+      "ABISnr",
+      "diagnosis",
+      "conc_25OHD",
+      "DBP",
+      "exit_age",
+      "event",
+      child_covariates,
+      maternal_covariates
+    )
+  )) %>%
+  # re-scale conc_25OHD to estimate HR per per 10 μg/L
+  dplyr::mutate(conc_25OHD = conc_25OHD/10.0)
+
+```
+
+
+Check Proportinal Hazard Assumption
+a. conc_25OHD
+```{r}
+fit_lin_conc_25OHD <- coxph(
+  Surv(exit_age, event = event) ~ conc_25OHD +
+    Preterm_dichotomous +
+    Smoking_during_pregnancy +
+    Delivery_mode +
+    Birth_weight_cat + 
+    Season +
+    T1D_heredity_cat +
+    Fish_any_pregnancy +
+    Parity +
+    Vitamin_mineral_supplement_pregnancy,
+  data = df_cox_full,
+  weights = if_else(event == 1, 1 / f_cases, 1 / f),
+  robust = TRUE
+)
+
+# Schoenfeld residuals against the transformed time
+
+zph_lin_conc_25OHD <- cox.zph(fit_lin_conc_25OHD)
+zph_lin_conc_25OHD_table <- zph_lin_conc_25OHD$table %>% 
+  as.data.frame %>%
+  tibble::rownames_to_column(var = "Term") %>%
+  dplyr::mutate(Term = sapply(Term,clean_terms))%>%
+  dplyr::mutate(across(where(is.numeric), format_numeric))
+
+dimnames(zph_lin_conc_25OHD$y)[[2]] <- sapply(dimnames(zph_lin_conc_25OHD$y)[[2]], clean_terms)
+
+print(zph_lin_conc_25OHD)           # identify offenders
+          
+pdf(
+  paste0(output_dir,"/zph_linear_conc_25OHD_schoenfeld_residuals_vs_transformed_time_PH_check.pdf"),
+  width = 11.67, 
+  height = 8.67, 
+  font = "Times" 
+  )
+
+## page 1
+par(mfrow = c(2,2))
+plot(zph_lin_conc_25OHD, var = 1:4, plot = TRUE)
+
+## page 2
+par(mfrow = c(2,2))
+plot(zph_lin_conc_25OHD, var = 5:8, plot = TRUE)
+
+## page 3
+par(mfrow = c(2,2))
+plot(zph_lin_conc_25OHD, var = 9:10, plot = TRUE)
+
+
+dev.off()
+```
+
+b. DBP
+```{r}
+fit_lin_DBP   <- coxph(
+    Surv(exit_age, event = event) ~ DBP + 
+    Preterm_dichotomous +
+    Smoking_during_pregnancy +
+    Delivery_mode +
+    Birth_weight_cat + 
+    Season +
+    T1D_heredity_cat +
+    Fish_any_pregnancy +
+    Parity +
+    Vitamin_mineral_supplement_pregnancy,
+  data = df_cox_full
+)
+
+# Schoenfeld residuals against the transformed time
+
+zph_lin_DBP <- cox.zph(fit_lin_DBP)
+zph_lin_DBP_table <- zph_lin_DBP$table %>% 
+  as.data.frame %>%
+  tibble::rownames_to_column(var = "Term") %>%
+  dplyr::mutate(Term = sapply(Term,clean_terms)) %>%
+  dplyr::mutate(across(where(is.numeric), format_numeric))
+
+dimnames(zph_lin_DBP$y)[[2]] <- sapply(dimnames(zph_lin_DBP$y)[[2]], clean_terms)
+
+print(zph_lin_DBP)           # identify offenders
+          
+pdf(
+  paste0(output_dir,"/zph_linear_DBP_schoenfeld_residuals_vs_transformed_time_PH_check.pdf"),
+  width = 11.67, 
+  height = 8.67, 
+  font = "Times" 
+  )
+
+## page 1
+par(mfrow = c(2,2))
+plot(zph_lin_DBP, var = 1:4, plot = TRUE)
+
+## page 2
+par(mfrow = c(2,2))
+plot(zph_lin_DBP, var = 5:8, plot = TRUE)
+
+## page 2
+par(mfrow = c(2,2))
+plot(zph_lin_DBP, var = 9:10, plot = TRUE)
+
+
+dev.off()
+```
+
+
+
+```{r}
+ft_conc_25OHD <- flextable::flextable(zph_lin_conc_25OHD_table) %>%
+  flextable::autofit()
+
+ft_DBP <- flextable::flextable(zph_lin_DBP_table) %>%
+  flextable::autofit()
+```
+
+
+```{r}
+flextable::save_as_docx(
+  `scaled Schoenfeld residuals with time: conc_25OHD` = ft_conc_25OHD,
+  `scaled Schoenfeld residuals with time: DBP` = ft_DBP,
+  path = paste0(output_dir,"/scaled_schoenfeld_residuals_with_time.docx"),
+  pr_section = sect_properties
+)
+```
+
+
+Weighted Cox regression	Hazard ratio: relative rate of developing T1D at any given age. 
+
+```{r cox_model_base}
+unadjusted_conc_25OHD <- coxph(
+    Surv(exit_age, event = event) ~ conc_25OHD, 
+  data = df_cox_full, 
+  weights = if_else(event == 1, 1/f_cases, 1 / f),
+  robust = TRUE 
+  
+)
+
+unadjusted_DBP <- coxph(
+    Surv(exit_age, event = event) ~ DBP, 
+  data = df_cox_full, 
+  weights = if_else(event == 1, 1/f_cases, 1 / f),
+  robust = TRUE 
+  
+)
+```
+
+
+
+```{r weighted_cox_maternal_and_child_confounders}
+adjusted_conc_25OHD <-  coxph(
+    Surv(exit_age, event = event) ~ conc_25OHD + Preterm_dichotomous + 
+      Birth_weight_cat + Season + T1D_heredity_cat + Smoking_during_pregnancy +
+    Fish_any_pregnancy + Parity + Delivery_mode + Vitamin_mineral_supplement_pregnancy, 
+  data = df_cox_full, 
+  weights = if_else(event == 1, 1/f_cases, 1 / f),
+  robust = TRUE 
+)
+
+adjusted_DBP <-  coxph(
+    Surv(exit_age, event = event) ~ DBP + Preterm_dichotomous + 
+      Birth_weight_cat + Season + T1D_heredity_cat + Smoking_during_pregnancy +
+    Fish_any_pregnancy + Parity + Delivery_mode + Vitamin_mineral_supplement_pregnancy, 
+  data = df_cox_full, 
+  weights = if_else(event == 1, 1/f_cases, 1 / f),
+  robust = TRUE 
+)
+```
+
+
+create pattern strings to clean-tidy result tables 
+
+```{r}
+all_levels <- (paste0(paste0(
+  unique(
+    unlist(
+      lapply(
+        c(child_covariates,maternal_covariates), 
+        function(x) levels(factor(df_cox_full[[x]]))
+        )
+      )
+    )[-2], 
+  collapse = "|"), "|^Preterm$"))
+
+all_pat_replace <- paste0(
+  c(child_covariates,maternal_covariates), collapse = "|")
+```
+
+
+```{r tidy_model_base}
+tidy_unadjusted_conc_25OHD <- tidy_base_model(
+  unadjusted_conc_25OHD,
+  "Unadjusted",
+  "conc_25OHD",
+  df_cox_full = df_cox_full,
+  predictor_increment = "+ 10 μg/L"
+)
+
+tidy_unadjusted_DBP <- tidy_base_model(
+  unadjusted_DBP,
+  "Unadjusted",
+  "DBP",
+  df_cox_full = df_cox_full ,
+  predictor_increment = "+ 1 mg/L"
+)
+```
+
+
+
+```{r tidy_model_maternal_and_child_confounders}
+tidy_adjusted_conc_25OHD <- tidy_model_specific_covariates(
+  model = adjusted_conc_25OHD,
+  predictor = "conc_25OHD",
+  model_name = "Adjusted", 
+  covariates_as_pattern = all_pat_replace, 
+  covariate_levels_as_pattern = all_levels, 
+  df_cox_full = df_cox_full,
+  predictor_increment = "+ 10 μg/L" 
+  )
+
+tidy_adjusted_DBP <- tidy_model_specific_covariates(
+  model = adjusted_DBP,
+  predictor = "DBP",
+  model_name = "Adjusted", 
+  covariates_as_pattern = all_pat_replace, 
+  covariate_levels_as_pattern = all_levels, 
+  df_cox_full = df_cox_full ,
+  predictor_increment = "+1 mg/L"
+  )
+```
+
+
+
+```{r merged_all_model_results}
+merged_all_weighted_cox_results <-  rbind(
+  tidy_unadjusted_conc_25OHD,
+  tidy_unadjusted_DBP,
+  tidy_adjusted_conc_25OHD,
+  tidy_adjusted_DBP
+) %>%
+  dplyr::mutate(
+    Model = if_else(row_number() != 1 &
+                      lag(Model, 1) == Model &
+                      !(Term %in% c(
+                        "conc_25OHD", "DBP"
+                      )),
+                    NA_character_,
+                    Model)
+  ) %>%
+      dplyr::mutate(
+        Model = if_else(row_number() != 1 &
+                      (!is.na(lag(Model,1)) & Model == lag(Model, 1)),
+                    NA_character_,
+                    Model)
+      )  %>%
+  dplyr::mutate(
+    Level = str_replace(
+      Level, 
+      "(\\d+)", 
+      function(x) str_pad(x, 2, side = "left")
+      )
+    )
+```
+
+
+```{r merged_all_model_results_short_flex}
+merged_all_weighted_cox_results_short_flex <- merged_all_weighted_cox_results %>%
+  dplyr::filter(Term %in% c("conc 25OHD","DBP"))  %>%
+      dplyr::mutate(
+        Model = if_else(row_number() != 1 &
+                      (!is.na(lag(Model,1)) & Model == lag(Model, 1)),
+                    NA_character_,
+                    Model)
+      ) %>%
+  flextable::flextable()%>%
+  flextable::autofit() %>%
+  flextable::set_table_properties(width = 1, layout = "autofit") %>%
+  flextable::color(
+    i = ~ as.numeric(`P-value`) < 0.05,
+    j = c("Term", "Level", "P-value"),
+    color = "red"
+  ) 
+```
+
+
+```{r merged_all_model_results_long_flex}
+merged_all_weighted_cox_results_long_flex <- merged_all_weighted_cox_results %>%
+  flextable::flextable() %>%
+  flextable::autofit() %>%
+  flextable::set_table_properties(width = 1, layout = "autofit") %>%
+  flextable::color(
+    i = ~ as.numeric(`P-value`) < 0.05,
+    j = c("Term", "Level", "P-value"),
+    color = "red"
+  )  %>%
+  flextable::align(j = "Level", align = "right")
+```
+
+
+
+```{r save_merged_all_model_results}
+flextable::save_as_docx(
+  `Weighted Cox model` = merged_all_weighted_cox_results_short_flex,
+  path = paste0(output_dir,"/flex_merged_all_weighted_cox_results_short.docx"),
+  pr_section = sect_properties
+)
+
+flextable::save_as_docx(
+  `Weighted Cox model` = merged_all_weighted_cox_results_long_flex,
+  path = paste0(output_dir,"/flex_merged_all_weighted_cox_results_long.docx"),
+  pr_section = sect_properties
+)
+
+saveRDS(
+  object = merged_all_weighted_cox_results_short_flex,
+  file = paste0(
+    output_dir,
+    "/flex_merged_all_weighted_cox_results_short.RDS"
+  )
+)
+
+saveRDS(
+  object = merged_all_weighted_cox_results_long_flex,
+  file = paste0(
+    output_dir,
+    "/flex_merged_all_weighted_cox_results_long.RDS"
+  )
+)
+```
